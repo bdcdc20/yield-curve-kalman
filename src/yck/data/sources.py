@@ -6,6 +6,7 @@ is unit-tested offline, and a thin `fetch_*` wrapper that downloads and parses.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import zipfile
@@ -15,6 +16,8 @@ import numpy as np
 import pandas as pd
 
 from .http import fetch_to_cache, get
+
+log = logging.getLogger("yck.data")
 
 SVENSSON_PARAMS = ["BETA0", "BETA1", "BETA2", "BETA3", "TAU1", "TAU2"]
 
@@ -85,14 +88,19 @@ def parse_boe_zip(blob: bytes, main_sheet: str, short_sheet: str) -> pd.DataFram
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         for name in sorted(zf.namelist()):
             if not name.lower().endswith((".xlsx", ".xls")):
+                log.info("BoE zip: skipping %s", name)
                 continue
             book = pd.read_excel(io.BytesIO(zf.read(name)), sheet_name=None, header=None)
+            log.info("BoE zip: %s sheets=%s", name, list(book))
             parts = []
             if short_sheet in book:
                 parts.append(parse_boe_sheet(book[short_sheet], "months"))
             if main_sheet in book:
                 parts.append(parse_boe_sheet(book[main_sheet], "years"))
+            if not parts:
+                log.warning("BoE zip: %s has neither %r nor %r", name, main_sheet, short_sheet)
             if parts:
+                log.info("BoE zip: %s -> %s to %s", name, parts[-1].index.min().date(), parts[-1].index.max().date())
                 # Short-end sheet wins where both have the same maturity.
                 merged = parts[0]
                 for p in parts[1:]:
