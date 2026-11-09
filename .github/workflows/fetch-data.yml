@@ -1,0 +1,35 @@
+# Runs the full download on a GitHub runner (open internet) and attaches the
+# processed panels + coverage report as an artifact. Needs the FRED_API_KEY
+# repository secret for the ALFRED vintages.
+name: fetch data
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Currencies to fetch (blank = all), e.g. USD EUR"
+        required: false
+        default: ""
+  schedule:
+    - cron: "17 6 3 * *"   # monthly, after most macro releases
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e .
+      - name: Fetch and build
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          ONLY="${{ github.event.inputs.only }}"
+          python -m yck fetch ${ONLY:+--only $ONLY} || echo "FETCH_FAILED=1" >> "$GITHUB_ENV"
+          cat data/processed/coverage.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: processed-data
+          path: data/processed/
+      - name: Fail if any source failed
+        if: env.FETCH_FAILED == '1'
+        run: exit 1

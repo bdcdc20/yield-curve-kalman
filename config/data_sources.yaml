@@ -1,0 +1,57 @@
+# Data sources for the yield-curve-kalman project.
+# Everything here is free and public. Fixing a broken series ID should only
+# ever need an edit to this file, not to the code.
+
+# Maturity grid in months. These are the 17 maturities used by
+# Diebold-Rudebusch-Aruoba (2006) / Diebold-Li (2006).
+maturities_months: [3, 6, 9, 12, 15, 18, 21, 24, 30, 36, 48, 60, 72, 84, 96, 108, 120]
+
+curves:
+  USD:
+    # Gurkaynak-Sack-Wright (2007) Svensson fit, daily, 1961-present.
+    # We evaluate the published parameters on our grid rather than using the
+    # SVENYxx columns, which only cover whole years.
+    source: fed_gsw
+    url: https://www.federalreserve.gov/data/yield-curve-tables/feds200628.csv
+    # GSW excludes bills, so fits below ~1y are extrapolated. Keep T-bills
+    # alongside as a check on the short end.
+    short_end_check: [DTB3, DTB6]
+  EUR:
+    # ECB Svensson fit, AAA-rated euro area central government bonds, daily, Sep 2004-present.
+    source: ecb_yc
+    flow: YC
+    key_prefix: B.U2.EUR.4F.G_N_A.SV_C_YM
+    params: [BETA0, BETA1, BETA2, BETA3, TAU1, TAU2]
+    # Published spot rates, used only to verify our reconstruction from the parameters.
+    check_rates: [SR_1Y, SR_5Y, SR_10Y]
+  GBP:
+    # BoE nominal government liability curve (Anderson-Sleath spline), daily, 1979-present.
+    source: boe_glc
+    url: https://www.bankofengland.co.uk/-/media/boe/files/statistics/yield-curves/glcnominalddata.zip
+    sheets:
+      main: "4. spot curve"          # maturities in years (0.5y steps)
+      short_end: "3. spot, short end" # maturities in months, used for 3-21m
+
+# Macro block: real activity, inflation, policy rate (DRA 2006).
+# transform: level | yoy  (yoy = 12-month % change of an index)
+# vintages: true -> pull the full ALFRED real-time history (needs FRED_API_KEY)
+macro:
+  USD:
+    real_activity: {source: fred, id: TCU, transform: level, vintages: true}       # capacity utilisation, as in DRA
+    inflation:     {source: fred, id: PCEPI, transform: yoy, vintages: true}       # PCE price index, as in DRA
+    policy_rate:   {source: fred, id: FEDFUNDS, transform: level, vintages: false} # never revised
+  EUR:
+    real_activity: {source: ecb, flow: STS, key: M.I9.Y.PROD.NS0020.4.000, transform: yoy}  # euro area industrial production
+    inflation:     {source: ecb, flow: ICP, key: M.U2.N.000000.4.ANR, transform: level}    # HICP, annual rate of change
+    policy_rate:   {source: ecb, flow: FM, key: D.U2.EUR.4F.KR.DFR.LEV, transform: level}  # deposit facility rate
+  GBP:
+    real_activity: {source: ons, uri: /economy/economicoutputandproductivity/output/timeseries/k222/diop, transform: yoy}  # index of production
+    inflation:     {source: ons, uri: /economy/inflationandpriceindices/timeseries/d7g7/mm23, transform: level}            # CPI annual rate
+    policy_rate:   {source: boe_iadb, code: IUDBEDR, transform: level}                                                     # Bank Rate
+
+# Publication lag (months) applied to macro series that have no vintage
+# history, so that a month-t forecast only uses data released by month t.
+release_lag_months:
+  real_activity: 2
+  inflation: 1
+  policy_rate: 0
