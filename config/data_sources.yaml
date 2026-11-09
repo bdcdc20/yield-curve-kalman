@@ -29,8 +29,9 @@ curves:
     source: boe_glc
     url: https://www.bankofengland.co.uk/-/media/boe/files/statistics/yield-curves/glcnominalddata.zip
     sheets:
-      main: "4. spot curve"          # maturities in years (0.5y steps)
-      short_end: "3. spot, short end" # maturities in months, used for 3-21m
+      # Pre-2005 workbooks prefix the sheet names with "nominal".
+      main: ["4. spot curve", "4. nominal spot curve"]                # maturities in years (0.5y steps)
+      short_end: ["3. spot, short end", "3. nominal spot, short end"] # maturities in months
 
 # Macro block: real activity, inflation, policy rate (DRA 2006).
 # transform: level | yoy  (yoy = 12-month % change of an index)

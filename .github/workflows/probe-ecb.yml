@@ -1,0 +1,17 @@
+# Lists ECB series matching a wildcard key with their latest observation.
+# Use it to find the right key when a series stops updating.
+name: probe ECB key
+on:
+  workflow_dispatch:
+    inputs:
+      flow: {description: "Dataflow, e.g. ICP", required: true}
+      key:  {description: "Key with wildcards, e.g. M..N.000000.4.ANR", required: true}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e .
+      - run: python -m yck probe-ecb "${{ github.event.inputs.flow }}" "${{ github.event.inputs.key }}"

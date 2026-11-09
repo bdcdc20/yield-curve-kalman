@@ -55,9 +55,25 @@ def parse_ecb_csv(text: str) -> pd.DataFrame:
 
 
 def fetch_ecb(flow: str, key: str, raw_dir: Path, name: str, refresh: bool = False) -> pd.DataFrame:
-    path = fetch_to_cache(f"{ECB_API}/{flow}/{key}", raw_dir, name,
-                          params={"format": "csvdata"}, refresh=refresh)
-    return parse_ecb_csv(path.read_text())
+    """Fetch one ECB series key. A '+' in the last segment is split into one request per series,
+    because the ECB API times out on large multi-series daily requests."""
+    head, _, last = key.rpartition(".")
+    frames = []
+    for part in last.split("+"):
+        k = f"{head}.{part}" if head else part
+        path = fetch_to_cache(f"{ECB_API}/{flow}/{k}", raw_dir, f"{name.removesuffix('.csv')}_{part}.csv",
+                              params={"format": "csvdata"}, refresh=refresh, timeout=180)
+        frames.append(parse_ecb_csv(path.read_text()))
+    return pd.concat(frames, axis=1).sort_index()
+
+
+def probe_ecb(flow: str, key: str) -> pd.DataFrame:
+    """List every series matching a (possibly wildcarded) ECB key with its last observation.
+    E.g. probe_ecb('ICP', 'M..N.000000.4.ANR') shows which euro-area code is still updated."""
+    r = get(f"{ECB_API}/{flow}/{key}", params={"format": "csvdata", "lastNObservations": 1}, timeout=180)
+    df = pd.read_csv(io.StringIO(r.text))
+    cols = [c for c in ("KEY", "TIME_PERIOD", "OBS_VALUE", "TITLE") if c in df.columns]
+    return df[cols].sort_values("TIME_PERIOD", ascending=False)
 
 
 # --------------------------------------------------------------------------- BoE GLC
@@ -73,7 +89,7 @@ def parse_boe_sheet(df: pd.DataFrame, unit: str) -> pd.DataFrame:
     mats = pd.to_numeric(df.iloc[hdr, 1:], errors="coerce")
     keep = mats.notna().to_numpy()
     body = df.iloc[hdr + 1:]
-    dates = pd.to_datetime(body.iloc[:, 0], errors="coerce")
+    dates = pd.to_datetime(body.iloc[:, 0], errors="coerce", format="mixed")
     body = body[dates.notna()]
     vals = body.iloc[:, 1:].loc[:, keep].apply(pd.to_numeric, errors="coerce")
     months = mats[keep].to_numpy(float) * (12.0 if unit == "years" else 1.0)
@@ -82,8 +98,17 @@ def parse_boe_sheet(df: pd.DataFrame, unit: str) -> pd.DataFrame:
     return vals
 
 
-def parse_boe_zip(blob: bytes, main_sheet: str, short_sheet: str) -> pd.DataFrame:
-    """All workbooks in the zip, main + short-end sheets, merged on (date, maturity in months)."""
+def _pick_sheet(book: dict, names) -> str | None:
+    names = [names] if isinstance(names, str) else list(names)
+    return next((n for n in names if n in book), None)
+
+
+def parse_boe_zip(blob: bytes, main_sheet, short_sheet) -> pd.DataFrame:
+    """All workbooks in the zip, main + short-end sheets, merged on (date, maturity in months).
+
+    main_sheet / short_sheet may be a name or a list of names (older workbooks
+    call them '4. nominal spot curve' etc.).
+    """
     frames = []
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         for name in sorted(zf.namelist()):
@@ -93,10 +118,11 @@ def parse_boe_zip(blob: bytes, main_sheet: str, short_sheet: str) -> pd.DataFram
             book = pd.read_excel(io.BytesIO(zf.read(name)), sheet_name=None, header=None)
             log.info("BoE zip: %s sheets=%s", name, list(book))
             parts = []
-            if short_sheet in book:
-                parts.append(parse_boe_sheet(book[short_sheet], "months"))
-            if main_sheet in book:
-                parts.append(parse_boe_sheet(book[main_sheet], "years"))
+            short_name, main_name = _pick_sheet(book, short_sheet), _pick_sheet(book, main_sheet)
+            if short_name:
+                parts.append(parse_boe_sheet(book[short_name], "months"))
+            if main_name:
+                parts.append(parse_boe_sheet(book[main_name], "years"))
             if not parts:
                 log.warning("BoE zip: %s has neither %r nor %r", name, main_sheet, short_sheet)
             if parts:

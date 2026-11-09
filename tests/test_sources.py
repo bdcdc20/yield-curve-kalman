@@ -40,7 +40,7 @@ def test_svensson_drops_fourth_term_when_missing():
 def test_month_end_takes_whole_last_row_and_keeps_gaps():
     idx = pd.to_datetime(["2020-01-30", "2020-01-31", "2020-02-27"])
     df = pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [10.0, np.nan, 30.0]}, index=idx)
-    m = month_end(df)
+    m = month_end(df, today=pd.Timestamp("2026-11-09"))
     assert list(m.index) == list(pd.to_datetime(["2020-01-31", "2020-02-29"]))
     assert m.loc["2020-01-31", "a"] == 2.0
     assert np.isnan(m.loc["2020-01-31", "b"])  # not back-filled from the 30th
@@ -99,6 +99,18 @@ def _boe_zip():
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("GLC Nominal daily data_2016 to present.xlsx", buf.getvalue())
     return z.getvalue()
+
+
+def test_month_end_drops_unfinished_current_month():
+    idx = pd.to_datetime(["2026-10-30", "2026-11-06"])
+    m = month_end(pd.DataFrame({"a": [1.0, 2.0]}, index=idx), today=pd.Timestamp("2026-11-09"))
+    assert list(m.index) == [pd.Timestamp("2026-10-31")]
+
+
+def test_parse_boe_zip_accepts_alternative_sheet_names():
+    df = src.parse_boe_zip(_boe_zip(), ["4. nominal spot curve", "4. spot curve"],
+                           ["3. nominal spot, short end", "3. spot, short end"])
+    assert 6.0 in df.columns
 
 
 def test_parse_boe_zip_merges_sheets_in_months():

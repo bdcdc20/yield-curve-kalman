@@ -34,7 +34,7 @@ def svensson_yield(params: pd.DataFrame, maturities_years) -> pd.DataFrame:
     return pd.DataFrame(y, index=params.index, columns=list(maturities_years))
 
 
-def month_end(df: pd.DataFrame) -> pd.DataFrame:
+def month_end(df: pd.DataFrame, today: pd.Timestamp | None = None) -> pd.DataFrame:
     """Last available day in each calendar month, indexed by month-end date.
 
     Takes the whole row from that day (not the last non-missing value per
@@ -42,6 +42,9 @@ def month_end(df: pd.DataFrame) -> pd.DataFrame:
     genuine gaps stay as NaN.
     """
     df = df.sort_index().dropna(how="all")
+    # The current calendar month isn't finished, so its last day isn't a month-end.
+    current = (today or pd.Timestamp.today()).to_period("M")
+    df = df[df.index.to_period("M") < current]
     out = df.groupby(df.index.to_period("M")).tail(1).copy()
     out.index = out.index.to_period("M").to_timestamp(how="end").normalize()
     out.index.name = "date"

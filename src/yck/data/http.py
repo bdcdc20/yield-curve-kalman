@@ -34,7 +34,7 @@ def get(url: str, params: dict | None = None, retries: int = 3, timeout: int = 6
 
 
 def fetch_to_cache(url: str, raw_dir: Path, name: str | None = None, params: dict | None = None,
-                   refresh: bool = False) -> Path:
+                   refresh: bool = False, timeout: int = 60) -> Path:
     """Download url into raw_dir and return the path. Reuses the cached copy unless refresh=True."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     if name is None:
@@ -43,5 +43,5 @@ def fetch_to_cache(url: str, raw_dir: Path, name: str | None = None, params: dic
     path = raw_dir / name
     if path.exists() and not refresh:
         return path
-    path.write_bytes(get(url, params=params).content)
+    path.write_bytes(get(url, params=params, timeout=timeout).content)
     return path
