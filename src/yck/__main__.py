@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--data-dir", type=Path, default=ROOT / "data")
     pr = sub.add_parser("probe-ecb", help="list ECB series matching a wildcard key, with last date")
     pr.add_argument("flow")
-    pr.add_argument("key")
+    pr.add_argument("key", nargs="?", default="", help="omit to list dataflows whose id/name matches FLOW")
     a = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -41,9 +41,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if ok else 1
     if a.cmd == "probe-ecb":
         import pandas as pd
-        from .data.sources import probe_ecb
+        from .data.sources import list_ecb_dataflows, probe_ecb
         with pd.option_context("display.width", 250, "display.max_colwidth", 90, "display.max_rows", 200):
-            print(probe_ecb(a.flow, a.key).to_string(index=False))
+            out = probe_ecb(a.flow, a.key) if a.key else list_ecb_dataflows(a.flow)
+            print(out.to_string(index=False))
         return 0
     return 2
 

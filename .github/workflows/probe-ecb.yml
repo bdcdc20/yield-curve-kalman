@@ -4,8 +4,8 @@ name: probe ECB key
 on:
   workflow_dispatch:
     inputs:
-      flow: {description: "Dataflow, e.g. ICP", required: true}
-      key:  {description: "Key with wildcards, e.g. M..N.000000.4.ANR", required: true}
+      flow: {description: "Dataflow (e.g. ICP), or a search term when key is blank", required: true}
+      key:  {description: "Key with wildcards, e.g. M..N.000000.4.ANR (blank = list matching dataflows)", required: false, default: ""}
 jobs:
   probe:
     runs-on: ubuntu-latest

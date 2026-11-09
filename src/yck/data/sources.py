@@ -67,6 +67,23 @@ def fetch_ecb(flow: str, key: str, raw_dir: Path, name: str, refresh: bool = Fal
     return pd.concat(frames, axis=1).sort_index()
 
 
+def list_ecb_dataflows(pattern: str = "") -> pd.DataFrame:
+    """All ECB dataflows (id, name), optionally filtered by a case-insensitive regex on either."""
+    import xml.etree.ElementTree as ET
+    r = get("https://data-api.ecb.europa.eu/service/dataflow/ECB", timeout=180)
+    root = ET.fromstring(r.content)
+    rows = []
+    for el in root.iter():
+        if el.tag.endswith("}Dataflow"):
+            name = next((c.text for c in el if c.tag.endswith("}Name")), "")
+            rows.append({"id": el.get("id"), "name": name})
+    df = pd.DataFrame(rows)
+    if pattern:
+        m = df["id"].str.contains(pattern, case=False, regex=True) | df["name"].str.contains(pattern, case=False, regex=True)
+        df = df[m]
+    return df.sort_values("id")
+
+
 def probe_ecb(flow: str, key: str) -> pd.DataFrame:
     """List every series matching a (possibly wildcarded) ECB key with its last observation.
     E.g. probe_ecb('ICP', 'M..N.000000.4.ANR') shows which euro-area code is still updated."""
