@@ -84,6 +84,32 @@ def list_ecb_dataflows(pattern: str = "") -> pd.DataFrame:
     return df.sort_values("id")
 
 
+def ecb_dimensions(flow: str) -> pd.DataFrame:
+    """Key dimensions of an ECB dataflow, in key order, with a few example codes each."""
+    import xml.etree.ElementTree as ET
+    r = get(f"https://data-api.ecb.europa.eu/service/dataflow/ECB/{flow}",
+            params={"references": "all"}, timeout=180)
+    root = ET.fromstring(r.content)
+    local = lambda e: e.tag.rsplit("}", 1)[-1]
+    codelists = {}
+    for cl in root.iter():
+        if local(cl) == "Codelist":
+            codes = []
+            for c in cl:
+                if local(c) == "Code":
+                    nm = next((n.text for n in c if local(n) == "Name"), "")
+                    codes.append(f"{c.get('id')}={nm}")
+            codelists[cl.get("id")] = codes
+    rows = []
+    for d in root.iter():
+        if local(d) == "Dimension":
+            ref = next((x.get("id") for x in d.iter() if local(x) == "Ref" and x.get("class") == "Codelist"), None)
+            codes = codelists.get(ref, [])
+            rows.append({"pos": int(d.get("position") or len(rows) + 1), "dimension": d.get("id"),
+                         "codelist": ref, "n_codes": len(codes), "examples": "; ".join(codes[:6])})
+    return pd.DataFrame(rows).sort_values("pos")
+
+
 def probe_ecb(flow: str, key: str) -> pd.DataFrame:
     """List every series matching a (possibly wildcarded) ECB key with its last observation.
     E.g. probe_ecb('ICP', 'M..N.000000.4.ANR') shows which euro-area code is still updated."""

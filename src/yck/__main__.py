@@ -41,9 +41,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if ok else 1
     if a.cmd == "probe-ecb":
         import pandas as pd
-        from .data.sources import list_ecb_dataflows, probe_ecb
+        from .data.sources import ecb_dimensions, list_ecb_dataflows, probe_ecb
         with pd.option_context("display.width", 250, "display.max_colwidth", 90, "display.max_rows", 200):
-            out = probe_ecb(a.flow, a.key) if a.key else list_ecb_dataflows(a.flow)
+            if a.key == "?":
+                out = ecb_dimensions(a.flow)
+            else:
+                out = probe_ecb(a.flow, a.key) if a.key else list_ecb_dataflows(a.flow)
             print(out.to_string(index=False))
         return 0
     return 2
