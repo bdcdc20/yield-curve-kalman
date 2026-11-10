@@ -128,6 +128,86 @@ def kalman_filter(model: StateSpace, y) -> FilterResult:
                         a_filt=a_filt, P_filt=P_filt, n_obs=n_obs)
 
 
+def _loglik_loop(y, Z, H, d, T, Q, c, a1, P1):
+    """Log-likelihood only: the same recursion as `kalman_filter`, written for numba.
+
+    Maximum likelihood evaluates the filter thousands of times, and in pure Python
+    the per-period overhead (not the 17x17 algebra) dominates. Compiled, this is
+    the same arithmetic without that overhead. It returns -inf when F_t is not
+    positive definite, so the optimiser simply rejects that parameter guess.
+    """
+    N, n = y.shape
+    a = a1.copy()
+    P = P1.copy()
+    ll = 0.0
+    for t in range(N):
+        idx = np.empty(n, np.int64)
+        m = 0
+        for j in range(n):
+            if np.isfinite(y[t, j]):
+                idx[m] = j
+                m += 1
+        if m > 0:
+            idx = idx[:m]
+            Zt = np.ascontiguousarray(Z[idx])
+            Ht = np.ascontiguousarray(H[idx][:, idx])
+            v = y[t][idx] - d[idx] - Zt @ a
+            PZ = P @ Zt.T
+            F = Zt @ PZ + Ht
+            ok = True
+            for i in range(m):
+                if not F[i, i] > 0.0:
+                    ok = False
+            if not ok:
+                return -np.inf
+            # Cholesky by hand: numba raises (and cannot be caught cheaply) on non-PD input.
+            L = np.zeros((m, m))
+            for i in range(m):
+                for j in range(i + 1):
+                    s = F[i, j]
+                    for q in range(j):
+                        s -= L[i, q] * L[j, q]
+                    if i == j:
+                        if s <= 0.0:
+                            return -np.inf
+                        L[i, i] = np.sqrt(s)
+                    else:
+                        L[i, j] = s / L[j, j]
+            Finv_v = np.linalg.solve(F, v)
+            K = np.linalg.solve(F, np.ascontiguousarray(PZ.T)).T
+            a = a + K @ v
+            P = P - K @ PZ.T
+            P = 0.5 * (P + P.T)
+            ll += -0.5 * (m * LOG_2PI + 2.0 * np.log(np.diag(L)).sum() + v @ Finv_v)
+        a = c + T @ a
+        P = T @ P @ T.T + Q
+    return ll
+
+
+try:
+    from numba import njit
+
+    _loglik_fast = njit(cache=True)(_loglik_loop)
+except ImportError:  # numba is optional: fall back to the readable filter
+    _loglik_fast = None
+
+
+def kalman_loglik(model: StateSpace, y) -> float:
+    """Log-likelihood of y under `model`; identical to kalman_filter(...).loglik but much faster.
+
+    Returns -inf (instead of raising) when the parameters make F_t singular.
+    """
+    y = np.atleast_2d(np.asarray(y, dtype=float))
+    if _loglik_fast is None:
+        try:
+            return kalman_filter(model, y).loglik
+        except np.linalg.LinAlgError:
+            return -np.inf
+    f = lambda x: np.ascontiguousarray(x, dtype=float)
+    return float(_loglik_fast(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q),
+                              f(model.c), f(model.a1), f(model.P1)))
+
+
 def rts_smoother(model: StateSpace, res: FilterResult):
     """Rauch-Tung-Striebel smoother: E[x_t | all data] and its covariance, as (a_smooth, P_smooth).
 

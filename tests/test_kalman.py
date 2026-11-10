@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from yck.model.dns import ns_loadings
-from yck.model.kalman import StateSpace, forecast_state, kalman_filter, rts_smoother, stationary_init
+from yck.model.kalman import StateSpace, forecast_state, kalman_filter, kalman_loglik, rts_smoother, stationary_init
 
 sm_ks = pytest.importorskip("statsmodels.tsa.statespace.kalman_smoother")
 
@@ -110,3 +110,17 @@ def test_forecast_state_reverts_to_mean():
     assert forecast_state(model, a, 0) == pytest.approx(a)
     assert forecast_state(model, a, 1) == pytest.approx(model.c + model.T @ a)
     assert forecast_state(model, a, 2000) == pytest.approx(model.a1, abs=1e-8)
+
+
+@pytest.mark.parametrize("gaps", [False, True], ids=["complete", "missing"])
+def test_fast_loglik_equals_reference_filter(gaps):
+    model, y = _dns_like_system()
+    if gaps:
+        y = _with_gaps(y)
+    assert kalman_loglik(model, y) == pytest.approx(kalman_filter(model, y).loglik, rel=1e-11)
+
+
+def test_fast_loglik_rejects_invalid_parameters():
+    model, y = _dns_like_system(N=20)
+    model.H = -np.eye(6)  # makes F_t indefinite
+    assert kalman_loglik(model, y) == -np.inf
