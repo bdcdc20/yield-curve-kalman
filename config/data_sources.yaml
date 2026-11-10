@@ -42,8 +42,8 @@ macro:
     inflation:     {source: fred, id: PCEPI, transform: yoy, vintages: true}       # PCE price index, as in DRA
     policy_rate:   {source: fred, id: FEDFUNDS, transform: level, vintages: false} # never revised
   EUR:
-    real_activity: {source: ecb, flow: STS, key: M.I9.Y.PROD.NS0020.4.000, transform: yoy}  # euro area industrial production
-    inflation:     {source: ecb, flow: ICP, key: M.U2.N.000000.4.ANR, transform: level}    # HICP, annual rate of change
+    real_activity: {source: ecb, flow: STBS, key: M.I10.Y.PROD.NS0020.4D0.N.IX, transform: yoy}  # EA21 industrial production ex construction, SA+WDA (STS was frozen in 2025)
+    inflation:     {source: ecb, flow: HICP, key: M.U2.N.000000.4D0.ANR, transform: level}   # HICP annual rate, changing composition (ICP was frozen at Dec 2025)
     policy_rate:   {source: ecb, flow: FM, key: D.U2.EUR.4F.KR.DFR.LEV, transform: level}  # deposit facility rate
   GBP:
     real_activity: {source: ons, uri: /economy/economicoutputandproductivity/output/timeseries/k222/diop, transform: yoy}  # index of production
