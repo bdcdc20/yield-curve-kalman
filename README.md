@@ -81,11 +81,12 @@ As of 10 Nov 2026:
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 31 tests (parsers, DNS, backtest), all passing (`pytest -q`) |
+| Offline tests | **Done.** 37 tests (parsers, DNS, backtest, Kalman filter vs statsmodels), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
-| One-step Kalman / maximum-likelihood DNS (yields only) | **Next** |
+| Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; ~20 ms per likelihood on USD 1985– |
+| One-step maximum-likelihood DNS (yields only) | **Next** |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
 | Rolling out-of-sample forecasts, benchmarks, tests | Not started |
 | Cross-currency comparison and write-up | Not started |
@@ -131,6 +132,7 @@ src/yck/
   data/curves.py            Svensson/Nelson-Siegel evaluation, month-end sampling
   data/build.py             orchestrates everything and writes data/processed + coverage.md
   model/dns.py              Nelson-Siegel loadings, two-step Diebold-Li estimation, factor dynamics, forecasts
+  model/kalman.py           generic Kalman filter (missing rows), log-likelihood, RTS smoother, stationary prior
   eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), random walk, RMSE tables
 notebooks/                  analysis notebooks, committed with outputs
 tests/                      offline tests: parsers (small samples in each source's real format), DNS, backtest
@@ -364,7 +366,7 @@ and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
 2. ✅ **`notebooks/01_two_step_usd.ipynb`:** plot USD factors against the
    empirical proxies (§6.2), fit RMSE by maturity, and a first out-of-sample
    comparison with the random walk at h = 1, 6, 12.
-3. **`src/yck/model/kalman.py`:** a generic linear-Gaussian filter
+3. ✅ **`src/yck/model/kalman.py`:** a generic linear-Gaussian filter
    (predict, update with missing rows, log-likelihood) and an RTS smoother.
    Test it against `statsmodels` on simulated data, including missing rows.
 4. **`src/yck/model/statespace_dns.py`:** parameter packing/unpacking,
@@ -377,8 +379,8 @@ and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
    ratios against RW and the CW statistics, plus factor and impulse-response
    charts.
 
-`matplotlib` and `jupyter` are in the `notebook` extra. Still to add when
-needed: `scipy` (core) and `statsmodels` (test reference only).
+Dependencies: `scipy` is core; `statsmodels` is in `dev` (test reference
+only); `matplotlib` and `jupyter` are in the `notebook` extra.
 
 ## 9. Conventions and decisions already made
 
