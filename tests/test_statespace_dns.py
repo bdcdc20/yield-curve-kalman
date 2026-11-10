@@ -148,3 +148,84 @@ def test_noise_floor_is_respected_and_multistart_never_worse():
     assert np.sqrt(free.params.h).min() * 100 < 1.0
     multi = fit_dns_mle(y, h_floor_bp=1.0, n_starts=3)
     assert multi.loglik >= one.loglik - 1e-6
+
+
+# --------------------------------------------------------------------------- yields + macro (DRA)
+def _simulate_dra(N=300, seed=21, release_lag=2):
+    """3 factors + 2 macro states; inflation (state 4) feeds into the level factor."""
+    rng = np.random.default_rng(seed)
+    k = 5
+    A = np.diag([0.95, 0.9, 0.8, 0.9, 0.85])
+    A[0, 4] = 0.08          # macro -> level: the effect the macro model should find
+    A[3, 1] = -0.05         # slope -> real activity
+    mu = np.array([5.0, -1.5, 0.0, 0.0, 2.0])
+    Q = np.diag([0.04, 0.09, 0.25, 0.3, 0.1])
+    p = DNSParams(mu=mu, A=A, Q=Q, h=np.full(len(GRID), 0.05**2), lam=0.0609)
+    ss = p.statespace(np.array(GRID, float))
+    x = np.empty((N, k))
+    x[0] = ss.a1
+    for t in range(1, N):
+        x[t] = ss.c + A @ x[t - 1] + rng.normal(size=k) * np.sqrt(np.diag(Q))
+    y = x[:, :3] @ ns_loadings(GRID).T + rng.normal(size=(N, len(GRID))) * 0.05
+    idx = pd.date_range("1990-01-31", periods=N, freq="ME", name="date")
+    data = pd.DataFrame(y, index=idx, columns=COLS)
+    data["real_activity"], data["inflation"] = x[:, 3], x[:, 4]
+    data.iloc[-release_lag:, -2:] = np.nan  # not yet published at the end of the sample
+    return data, p, x
+
+
+def test_macro_pack_unpack_and_layout():
+    data, p, _ = _simulate_dra(N=50)
+    theta = p.to_vector()
+    assert theta.size == 5 + 25 + 15 + len(GRID)
+    back = DNSParams.from_vector(theta, len(GRID), k=5)
+    np.testing.assert_allclose(back.A, p.A, atol=1e-12)
+    np.testing.assert_allclose(back.Q, p.Q, atol=1e-12)
+    ss = p.statespace(np.array(GRID, float))
+    assert ss.Z.shape == (len(GRID) + 2, 5)
+    np.testing.assert_array_equal(ss.Z[len(GRID):, 3:], np.eye(2))       # macro observed 1:1
+    np.testing.assert_array_equal(ss.Z[:len(GRID), 3:], 0.0)             # yields load on factors only
+
+
+def test_macro_score_matches_numerical_gradient():
+    from yck.model.kalman import kalman_loglik, smoothed_stats
+    from yck.model.statespace_dns import score
+
+    data, p, _ = _simulate_dra(N=120)
+    Y, tau = data.to_numpy(), np.array(GRID, float)
+    q = DNSParams(p.mu + 0.2, p.A * 0.97, p.Q * 1.4, p.h * 0.6, p.lam)
+    theta = q.to_vector()
+    g = score(theta, smoothed_stats(q.statespace(tau), Y), tau)
+
+    def ll(th):
+        return kalman_loglik(DNSParams.from_vector(th, len(GRID), k=5).statespace(tau), Y)
+
+    num = np.array([(ll(theta + e) - ll(theta - e)) / 2e-6 for e in np.eye(theta.size) * 1e-6])
+    np.testing.assert_allclose(g, num, rtol=1e-4, atol=2e-3)
+
+
+@pytest.fixture(scope="module")
+def dra_fit():
+    data, p, x = _simulate_dra()
+    return data, p, x, fit_dns_mle(data)
+
+
+def test_macro_mle_recovers_macro_to_level_effect(dra_fit):
+    data, p, _, fit = dra_fit
+    assert fit.params.k == 5 and fit.state_names[3:] == ["real_activity", "inflation"]
+    assert fit.params.A[0, 4] == pytest.approx(0.08, abs=0.04)
+    assert fit.loglik >= kalman_filter(p.statespace(np.array(GRID, float)), data.to_numpy()).loglik - 1e-6
+
+
+def test_macro_states_reproduce_observed_macro_and_forecast_yields_only(dra_fit):
+    data, _, _, fit = dra_fit
+    ff = fit.filtered_factors(data)
+    obs = data[["real_activity", "inflation"]].dropna()
+    np.testing.assert_allclose(ff.loc[obs.index, ["real_activity", "inflation"]], obs, atol=1e-3)
+    assert fit.forecast(ff.iloc[-1].to_numpy(), 6).shape == (len(GRID),)
+
+
+def test_yields_only_is_the_special_case_without_macro_columns(dra_fit):
+    data, _, _, _ = dra_fit
+    fit = fit_dns_mle(data[COLS])
+    assert fit.params.k == 3 and fit.columns == COLS
