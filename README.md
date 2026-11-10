@@ -81,9 +81,10 @@ As of 10 Nov 2026:
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests for all parsers | **Done.** 14 tests, all passing (`pytest -q`) |
+| Offline tests | **Done.** 27 tests (parsers + DNS), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
-| Two-step Diebold–Li baseline (yields only) | **Next.** Not started |
+| Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
+| USD two-step notebook (factor plots, first RW comparison) | **Next** |
 | One-step Kalman / maximum-likelihood DNS (yields only) | Not started |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
 | Rolling out-of-sample forecasts, benchmarks, tests | Not started |
@@ -118,7 +119,7 @@ tests/test_sources.py       offline tests with small samples in each source's re
 data/                       raw/ and processed/ (git-ignored)
 ```
 
-Model code does not exist yet. Planned location: `src/yck/model/` (see §8).
+Model code lives in `src/yck/model/` (`dns.py`: loadings, two-step DL estimation and forecasts). Further modules are planned in §8.
 
 ## 4. Data pipeline
 
@@ -218,7 +219,8 @@ $f_t = (L_t, S_t, C_t)'$ and $\Lambda$ of size 17 × 3.
 ### 6.2 Two-step Diebold–Li (2006) baseline (do this first)
 
 1. Fix $\lambda = 0.0609$. This is Diebold–Li's value for maturities in
-   months; it maximises the curvature loading at 30 months.
+   months; it puts the peak of the curvature loading at about 30 months
+   (29.4 exactly).
 2. For each month, regress the cross-section of yields on $\Lambda$ by OLS,
    using only the maturities observed that month, to get
    $\hat f_t = (\hat L_t, \hat S_t, \hat C_t)$.
@@ -333,7 +335,7 @@ and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
 
 ## 8. Roadmap (next steps, in order)
 
-1. **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
+1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
    estimation (cross-section OLS with missing maturities, then AR(1)/VAR(1)),
    forecasts. Add tests: recover known factors from a simulated curve;
    loadings at the τ → 0 and τ → ∞ limits.

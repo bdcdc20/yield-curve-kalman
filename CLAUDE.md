@@ -12,8 +12,9 @@ evaluation protocol, the roadmap and the decisions already made.
 ## Where the project stands
 
 - The data pipeline is finished and verified (README §2).
-- The next task is **roadmap step 1: the two-step Diebold–Li baseline**
-  (`src/yck/model/dns.py`, README §6.2 and §8), on USD first.
+- Roadmap step 1 (two-step Diebold–Li baseline, `src/yck/model/dns.py`) is done.
+- The next task is **roadmap step 2: `notebooks/01_two_step_usd.ipynb`**
+  (README §8): USD factor plots, fit RMSE, first comparison with the random walk.
 
 ## First-time setup check
 
@@ -22,7 +23,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 14 passed
+python3 -m pytest -q                  # expect 27 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```
