@@ -435,6 +435,20 @@ instead ask whether it beats **what the market already prices**.
   worse than both benchmarks almost everywhere. In other words, the curve
   alone contains nothing the market has not already priced, which makes
   the macro model (§6.4) the real test.
+- **Yields + macro, first results (USD, real-time macro).** The full DRA
+  model (6 states, 80 parameters; Kalman, λ fixed) is *worse* than
+  yields-only: RMSE ratio to RW at h = 12 is 1.00 / 1.10 / 1.18 / 1.29 /
+  1.25 (3m / 12m / 24m / 5y / 10y), significantly worse than RW at 2y+.
+  Clark–West finds no gain from macro at h = 12, only faint short-end
+  signal at h = 1 and 6 (p 0.02–0.10). The likely cause is overfitting:
+  36 VAR coefficients, most weakly identified. A *parsimonious* version
+  supports this. A two-step VAR on (level, slope, curvature, fed funds)
+  beats the yields-only VAR by Clark–West at the short end (3m and 12m at
+  h = 6, 12, p ≤ 0.05). Its RMSE ratios to RW are the best so far
+  (3m 0.81 / 0.86, 12m 0.93 / 0.95 at h = 6 / 12), and for the first time
+  it is below forwards (0.95–0.99), though not significantly. So macro
+  information helps the short end when the model is small enough to
+  estimate it. Next: restricted / shrunk macro models (§8, step 6).
 - **Surveys (USD, optional).** Philadelphia Fed Survey of Professional
   Forecasters: quarterly 3m T-bill and 10y Treasury forecasts (free).
 - Test every model against each benchmark with Diebold–Mariano (§7.2).
@@ -525,7 +539,13 @@ premium), and that is the bar a model must clear.
    data pipeline and forward benchmark (§7.4), optional SPF survey,
    Diebold–Mariano and Clark–West tests (§7.2), results tables (CSV +
    markdown).
-6. **Yields + macro (§6.4).** Real-time macro panels first (§7.3: ALFRED
+6. 🔶 **Yields + macro (§6.4).** Done: real-time macro panels
+   (`data/realtime.py`), the DRA state-space model (any number of macro
+   states, analytic score), real-time backtest (`python -m yck backtest
+   --macro`). First result: the full 6-state model overfits (§7.4).
+   Remaining: restricted or shrunk versions (policy rate only, a
+   block-restricted A, shrinkage towards yields-only), impulse responses and
+   a notebook. Original plan: real-time macro panels first (§7.3: ALFRED
    vintages for USD, release lags for EUR/GBP, unreleased months as missing
    observations). Then the 6-state DRA model with macro observed without
    error, with EM and the exact score extended to it, impulse responses and
