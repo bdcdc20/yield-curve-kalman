@@ -125,8 +125,17 @@ def dns_kalman_forecasts(
     cache_dir: str | Path | None = None,
     fits: list | None = None,
     verbose: bool = False,
+    macro=None,
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
+
+    With `macro` (a `yck.data.realtime.RealTimeMacro`, or anything with an
+    `at(origin, index)` method), this is the yields + macro model (README
+    section 6.4). Every re-estimation and every forecast at origin t uses the
+    macro panel *as known at t*: unreleased months are missing observations,
+    and earlier months carry the values published by t, not later
+    revisions. Because the vintage changes each month, the filter is re-run
+    on each origin's own panel.
 
     Parameters are re-estimated every `reestimate_every` origins (12 = yearly)
     on data up to that origin. Each re-estimation is independent: it uses
@@ -152,7 +161,14 @@ def dns_kalman_forecasts(
     refit_at = list(origins[::reestimate_every])
     settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
     cache = str(cache_dir) if cache_dir else None
-    samples = [y.loc[:t] for t in refit_at]
+
+    def panel(t):
+        """Everything a forecaster had at origin t."""
+        if macro is None:
+            return y.loc[:t]
+        return pd.concat([y.loc[:t], macro.at(t, index=y.index)], axis=1)
+
+    samples = [panel(t) for t in refit_at]
 
     t0 = time.perf_counter()
     if jobs > 1:
@@ -170,11 +186,15 @@ def dns_kalman_forecasts(
     pos = {d: i for i, d in enumerate(y.index)}
     out: dict[int, list] = {h: [] for h in horizons}
     for fit, t_fit, t_next in zip(fitted, refit_at, refit_at[1:] + [None]):
-        a_filt = fit.filter(y).a_filt  # row s uses y up to s only
         block = origins[(origins >= t_fit) & ((origins < t_next) if t_next is not None else True)]
+        if macro is None:
+            a_filt = fit.filter(y).a_filt  # row s uses y up to s only
+            states = {t: a_filt[pos[t]] for t in block}
+        else:
+            states = {t: fit.filter(panel(t)).a_filt[-1] for t in block}
         for t in block:
             for h in horizons:
-                out[h].append((_target(t, h), fit.forecast(a_filt[pos[t]], h)))
+                out[h].append((_target(t, h), fit.forecast(states[t], h)))
     return {
         h: pd.DataFrame(np.array([v for _, v in rows]), index=pd.DatetimeIndex([d for d, _ in rows], name="date"),
                         columns=y.columns)

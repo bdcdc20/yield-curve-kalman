@@ -111,3 +111,35 @@ def test_forward_missing_inputs_stay_missing_and_index_is_target_date():
     assert np.isnan(fw["12m"].iloc[1])           # y(6m) missing that month
     assert fw["24m"].isna().all()                # y(30m) not available at all
     assert fw["12m"].iloc[0] == pytest.approx((18 * 3.0 - 6 * 2.0) / 12)
+
+
+class _LaggedMacro:
+    """Minimal real-time macro source: latest values, last `lag` months before each origin unknown."""
+
+    def __init__(self, latest, lag=1):
+        self.latest, self.lag = latest, lag
+
+    def at(self, origin, index=None):
+        known = self.latest.loc[: origin - pd.offsets.MonthEnd(self.lag)]
+        return known.reindex(index[index <= origin]) if index is not None else known
+
+
+def test_macro_forecasts_have_no_look_ahead_in_yields_or_macro():
+    y = _panel(T=130)
+    rng = np.random.default_rng(5)
+    m = pd.DataFrame({"inflation": 2 + np.cumsum(rng.normal(scale=0.1, size=len(y)))}, index=y.index)
+    origin = y.index[110]
+    kw = dict(horizons=(1, 6), first_origin=origin, reestimate_every=12, n_starts=1)
+    base = dns_kalman_forecasts(y, macro=_LaggedMacro(m), **kw)
+    y2, m2 = y.copy(), m.copy()
+    y2.iloc[111:] += 2.0
+    m2.iloc[110:] += 5.0  # month 110 itself is not yet released at origin 110 (lag 1)
+    after = dns_kalman_forecasts(y2, macro=_LaggedMacro(m2), **kw)
+    for h in (1, 6):
+        target = origin + pd.offsets.MonthEnd(h)
+        pd.testing.assert_series_equal(base[h].loc[target], after[h].loc[target])
+    # ...and the macro data do matter: changing the released history changes the forecast.
+    m3 = m.copy()
+    m3.iloc[:100] += 1.0
+    other = dns_kalman_forecasts(y, macro=_LaggedMacro(m3), **kw)
+    assert not np.allclose(base[1].iloc[0], other[1].iloc[0])

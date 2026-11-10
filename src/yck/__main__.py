@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--est-start", help="first month of the estimation sample (default: per currency)")
     b.add_argument("--first-origin", help="first forecast origin (default: per currency)")
     b.add_argument("--no-cache", action="store_true", help="refit everything instead of reusing data/results/cache")
+    b.add_argument("--macro", action="store_true", help="yields + macro model with real-time macro panels (README 6.4)")
+    b.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
     b.add_argument("--data-dir", type=Path, default=ROOT / "data")
     a = p.parse_args(argv)
 
@@ -76,6 +78,7 @@ def _backtest(a) -> int:
     import time
 
     import pandas as pd
+    from .data.realtime import RealTimeMacro
     from .eval.backtest import dns_kalman_forecasts
 
     jobs = a.jobs or os.cpu_count() or 1
@@ -86,20 +89,21 @@ def _backtest(a) -> int:
         est_start, first_origin = _BACKTEST_DEFAULTS[ccy]
         est_start, first_origin = a.est_start or est_start, a.first_origin or first_origin
         y = pd.read_parquet(a.data_dir / "processed" / f"curves_{ccy}.parquet")
+        macro = RealTimeMacro.load(ccy, a.data_dir, a.config) if a.macro else None
         for lam_mode in a.lam:
-            tag = f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
+            tag = ("macro_" if a.macro else "") + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
             print(f"== {ccy} {tag}: estimation from {est_start or 'start'}, origins from {first_origin}, "
                   f"{a.starts} starts, {jobs} jobs", flush=True)
             fits, t0 = [], time.perf_counter()
             fc = dns_kalman_forecasts(y, est_start=est_start, first_origin=first_origin, reestimate_every=a.every,
                                       estimate_lambda=lam_mode == "est", h_floor_bp=floor, n_starts=a.starts,
                                       jobs=jobs, cache_dir=None if a.no_cache else out_dir / "cache",
-                                      fits=fits, verbose=True)
+                                      fits=fits, verbose=True, macro=macro)
             for h, df in fc.items():
                 df.to_parquet(out_dir / f"fc_{ccy}_kalman_{tag}_h{h}.parquet")
             pd.DataFrame([{"origin": t, "loglik": f.loglik, "lam": f.params.lam, "converged": f.converged,
-                           **{f"A{i}{j}": f.params.A[i, j] for i in range(3) for j in range(3)},
-                           **{f"mu{i}": f.params.mu[i] for i in range(3)}}
+                           **{f"A{i}{j}": f.params.A[i, j] for i in range(f.params.k) for j in range(f.params.k)},
+                           **{f"mu{i}": f.params.mu[i] for i in range(f.params.k)}}
                           for t, f in fits]).to_csv(out_dir / f"params_{ccy}_kalman_{tag}.csv", index=False)
             print(f"   done in {time.perf_counter() - t0:.0f}s -> {out_dir}", flush=True)
     return 0
