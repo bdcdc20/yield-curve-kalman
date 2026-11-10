@@ -494,14 +494,20 @@ premium), and that is the bar a model must clear.
    data pipeline and forward benchmark (§7.4), optional SPF survey,
    Diebold–Mariano and Clark–West tests (§7.2), results tables (CSV +
    markdown).
-6. **Trading evaluation (`src/yck/eval/trading.py`, §7.5):** excess
-   returns from the curves, carry / roll-down benchmark, then strategies,
-   short-rate vs forwards first, then duration, curve and fly, with
-   variance-based sizing, costs, Sharpe and certainty-equivalent return.
-7. **Yields + macro (§6.4)** with real-time macro (§7.3). Rerun 5 and 6 for
-   it. The headline result is macro vs no macro in both RMSE and P&L.
-8. Run for USD, then EUR and GBP. Cross-currency comparison, including
-   cross-currency relative-value trades.
+6. **Yields + macro (§6.4).** Real-time macro panels first (§7.3: ALFRED
+   vintages for USD, release lags for EUR/GBP, unreleased months as missing
+   observations). Then the 6-state DRA model with macro observed without
+   error, with EM and the exact score extended to it, impulse responses and
+   variance decompositions. Rerun step 5 for it: macro vs yields-only with
+   Clark–West, and against forwards with Diebold–Mariano.
+7. **EUR and GBP.** Run steps 5 and 6 for both. GBP exercises the
+   missing-short-end handling. Cross-currency comparison.
+8. **Trading evaluation (`src/yck/eval/trading.py`, §7.5), last, once the
+   models are final.** Excess returns from the curves, carry / roll-down
+   benchmark, then strategies: short-rate vs forwards first, then duration,
+   curve and fly, then cross-currency relative value. Variance-based
+   sizing, costs, Sharpe and certainty-equivalent return. The headline
+   result is macro vs no macro in both RMSE and P&L.
 9. Write-up in `README.md` (results section): RMSE ratios against RW and
    forwards, DM/CW statistics, strategy performance after costs, plus factor
    and impulse-response charts.

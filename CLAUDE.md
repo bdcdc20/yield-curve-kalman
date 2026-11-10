@@ -21,7 +21,9 @@ evaluation protocol, the roadmap and the decisions already made.
   results are in README §2 and `notebooks/02_kalman_usd.ipynb`.
 - The next task is **roadmap step 5**: forward-rate panel in the data
   pipeline and forward benchmark (README §7.4), then Diebold–Mariano and
-  Clark–West tests. Then trading evaluation (§7.5).
+  Clark–West tests. Agreed order after that (Nov 2026): macro model (§6.4,
+  roadmap 6), then EUR/GBP (7), and **trading evaluation last** (8), once
+  the models are final.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. Bump `FIT_CACHE_VERSION` in `eval/backtest.py`
   whenever the estimator changes. Parallel code must live in importable
