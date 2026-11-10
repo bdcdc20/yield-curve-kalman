@@ -87,7 +87,7 @@ As of 10 Nov 2026:
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
 | Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; ~20 ms per likelihood on USD 1985– |
-| One-step maximum-likelihood DNS (yields only) | **Done** (`statespace_dns.py`, `notebooks/02_kalman_usd.ipynb`). EM + exact score, 1 bp noise floor, multistart; full USD backtest ~15 min from scratch, seconds from cache |
+| One-step maximum-likelihood DNS (yields only) | **Done** (`statespace_dns.py`, `notebooks/02_kalman_usd.ipynb`). EM + exact score, 1 bp noise floor, multistart; full USD backtest ~1 min from scratch (both λ variants), seconds from cache |
 | Forward-rate and survey benchmarks, trading evaluation | Planned (§7.4, §7.5) |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
 | Rolling out-of-sample forecasts, benchmarks, tests | Not started |
@@ -533,7 +533,19 @@ premium), and that is the bar a model must clear.
    make the likelihood badly conditioned. With the floor, every fit
    converges and starts agree on one or two optima. Refits are independent,
    parallel and cached (`python -m yck backtest`): a full USD backtest
-   takes ~15 min on 8 cores from scratch (was 45–60 min per λ variant)
+   takes ~1 min on 8 cores from scratch (was 45–60 min per λ variant)
+4c. ✅ **Performance pass** (profiled first; each change verified to give
+   the same optima). Per-call and per-fit costs on the 6-state USD macro
+   model, and full-backtest wall times on 8 cores:
+
+   | | Before | After | How |
+   |---|---|---|---|
+   | Log-likelihood | 5.8 ms | 1.0 ms | Information-form filter (Woodbury + determinant lemma): k×k algebra instead of an n×n factorisation each month; Z′H⁻¹Z rebuilt only when the missing-data pattern changes |
+   | Score | 28 ms | 0.3 ms | Closed-form gradient of the expected complete-data log-likelihood (adjoint Lyapunov solve for the stationary prior) |
+   | Multistart | 6 full optimisations | 6 short scouts + best 2 finished | Pruning: starts are within ~1 point of their optimum after 0.5% of the work |
+   | Stopping | 5,800 passes/start, 43% gaining < 0.001 | gradient < 0.005, gain < 1e-7 | Optima match the old strict settings to ≤ 0.01 |
+   | Two-step refits per origin | O(t) each | O(1) each | Prefix sums of the regression cross-products (sliding window for rolling) |
+   | USD backtest, yields-only λ fixed / λ est. / macro | 291 s / 622 s / 1,300 s | 21 s / 37 s / 104 s | All of the above; yields-only log-likelihoods within 0.001 of before, macro within 0.08 |
    and seconds from the cache.
 5. **Benchmarks and tests (`src/yck/eval/`):** forward-rate panel in the
    data pipeline and forward benchmark (§7.4), optional SPF survey,

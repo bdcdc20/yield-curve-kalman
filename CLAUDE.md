@@ -29,9 +29,11 @@ evaluation protocol, the roadmap and the decisions already made.
   Next: restricted / shrunk macro models, impulse responses, notebook 03. Agreed order after that: EUR/GBP (7),
   then **trading evaluation last** (8), once the models are final.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
-  `data/results/cache/`. Bump `FIT_CACHE_VERSION` in `eval/backtest.py`
-  whenever the estimator changes. Parallel code must live in importable
-  modules (macOS uses `spawn`), not in scripts piped through stdin.
+  `data/results/cache/`. Full USD backtests take ~20 s (yields-only) to
+  ~2 min (macro) from scratch on 8 cores. Bump `FIT_CACHE_VERSION` in
+  `eval/backtest.py` whenever the estimator changes. Parallel code must live
+  in importable modules (macOS uses `spawn`), not in scripts piped through
+  stdin. Profile before optimising (README §8, step 4c).
 
 ## First-time setup check
 
