@@ -35,7 +35,7 @@ root (the folder containing this README).
 
 ```bash
 # 1. Install the package in editable mode, with test dependencies
-python3 -m pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"            # add ",notebook" for matplotlib + jupyter
 
 # 2. Create the local secrets file (git ignores it, so it is never committed).
 #    Replace YOUR_KEY with the FRED API key from
@@ -81,11 +81,11 @@ As of 10 Nov 2026:
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 27 tests (parsers + DNS), all passing (`pytest -q`) |
+| Offline tests | **Done.** 31 tests (parsers, DNS, backtest), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
-| USD two-step notebook (factor plots, first RW comparison) | **Next** |
-| One-step Kalman / maximum-likelihood DNS (yields only) | Not started |
+| USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
+| One-step Kalman / maximum-likelihood DNS (yields only) | **Next** |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
 | Rolling out-of-sample forecasts, benchmarks, tests | Not started |
 | Cross-currency comparison and write-up | Not started |
@@ -101,6 +101,25 @@ Latest verified coverage (month-end, output of `python -m yck fetch`):
 USD ALFRED vintages: capacity utilisation 386 vintages (first 1996-11-15);
 PCE price index 317 vintages (first 2000-08-01).
 
+**First results (two-step DNS, USD, `notebooks/01_two_step_usd.ipynb`).**
+Estimation from 1985, out-of-sample origins 2000-01 → 2026-10, re-estimated
+monthly. RMSE relative to the random walk (< 1 = better than RW):
+
+| | 3m | 12m | 24m | 60m | 120m |
+|---|---|---|---|---|---|
+| AR(1), h = 6 | 1.09 | 1.14 | 1.16 | 1.20 | 1.08 |
+| VAR(1), h = 6 | **0.84** | **0.95** | 1.01 | 1.08 | 1.03 |
+| AR(1), h = 12 | 1.06 | 1.10 | 1.15 | 1.26 | 1.17 |
+| VAR(1), h = 12 | **0.88** | **0.96** | 1.02 | 1.12 | 1.07 |
+
+The AR(1) baseline loses to the random walk after 2000. The VAR(1) wins
+only at the short end. The main cause is bias: forecasts revert to a high
+historical mean, so they ran too high in 2000–2015. For example, the mean
+12-month-ahead error at 10y was +58 bp in 2000–07 and +80 bp in 2008–15
+for the AR(1), against +20 / +31 bp for the RW. A rolling 10y window does
+not fix this. Can macro information correct it? That is the question for
+§6.4.
+
 ## 3. Repository layout
 
 ```
@@ -111,7 +130,10 @@ src/yck/
   data/sources.py           one parse_* (pure, unit-tested) + fetch_* per source; ECB probes; ALFRED as_of()
   data/curves.py            Svensson/Nelson-Siegel evaluation, month-end sampling
   data/build.py             orchestrates everything and writes data/processed + coverage.md
-tests/test_sources.py       offline tests with small samples in each source's real format
+  model/dns.py              Nelson-Siegel loadings, two-step Diebold-Li estimation, factor dynamics, forecasts
+  eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), random walk, RMSE tables
+notebooks/                  analysis notebooks, committed with outputs
+tests/                      offline tests: parsers (small samples in each source's real format), DNS, backtest
 .github/workflows/
   ci.yml                    pytest on every push / PR
   fetch-data.yml            full fetch on a GitHub runner (manual + monthly cron); coverage report in the log
@@ -119,7 +141,7 @@ tests/test_sources.py       offline tests with small samples in each source's re
 data/                       raw/ and processed/ (git-ignored)
 ```
 
-Model code lives in `src/yck/model/` (`dns.py`: loadings, two-step DL estimation and forecasts). Further modules are planned in §8.
+Further model and evaluation modules are planned in §8.
 
 ## 4. Data pipeline
 
@@ -339,7 +361,7 @@ and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
    estimation (cross-section OLS with missing maturities, then AR(1)/VAR(1)),
    forecasts. Add tests: recover known factors from a simulated curve;
    loadings at the τ → 0 and τ → ∞ limits.
-2. **`notebooks/01_two_step_usd.ipynb`:** plot USD factors against the
+2. ✅ **`notebooks/01_two_step_usd.ipynb`:** plot USD factors against the
    empirical proxies (§6.2), fit RMSE by maturity, and a first out-of-sample
    comparison with the random walk at h = 1, 6, 12.
 3. **`src/yck/model/kalman.py`:** a generic linear-Gaussian filter
@@ -355,8 +377,8 @@ and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
    ratios against RW and the CW statistics, plus factor and impulse-response
    charts.
 
-Dependencies to add when needed: `scipy`, `statsmodels` (test reference
-only), `matplotlib`, and `jupyter` under `[project.optional-dependencies]`.
+`matplotlib` and `jupyter` are in the `notebook` extra. Still to add when
+needed: `scipy` (core) and `statsmodels` (test reference only).
 
 ## 9. Conventions and decisions already made
 
