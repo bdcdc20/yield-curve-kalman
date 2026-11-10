@@ -19,11 +19,13 @@ evaluation protocol, the roadmap and the decisions already made.
 - Roadmap steps 4 and 4b (ML DNS with EM + exact score, 1 bp noise floor,
   multistart, parallel cached refits, `python -m yck backtest`) are done;
   results are in README §2 and `notebooks/02_kalman_usd.ipynb`.
-- The next task is **roadmap step 5**: forward-rate panel in the data
-  pipeline and forward benchmark (README §7.4), then Diebold–Mariano and
-  Clark–West tests. Agreed order after that (Nov 2026): macro model (§6.4,
-  roadmap 6), then EUR/GBP (7), and **trading evaluation last** (8), once
-  the models are final.
+- Roadmap step 5 is done except the optional SPF survey benchmark: forward
+  benchmark (`curves_ext_{CCY}.parquet`, `eval.backtest.forward_forecasts`)
+  and DM/CW tests (`eval/stats.py`). USD: nothing beats the random walk
+  significantly at h = 6, 12; no yields-only model beats forwards.
+- The next task is **roadmap step 6: yields + macro** (README §6.4), starting
+  with real-time macro panels (§7.3). Agreed order after that: EUR/GBP (7),
+  then **trading evaluation last** (8), once the models are final.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. Bump `FIT_CACHE_VERSION` in `eval/backtest.py`
   whenever the estimator changes. Parallel code must live in importable
@@ -36,7 +38,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 55 passed
+python3 -m pytest -q                  # expect 64 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```
