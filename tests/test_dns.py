@@ -136,3 +136,22 @@ def test_forecast_yields_matches_loadings_times_factor_forecast():
     out = forecast_yields(fac, dyn, 6, COLS)
     expected = dyn.forecast(F, 6) @ ns_loadings(GRID).T
     np.testing.assert_allclose(out.to_numpy(), expected)
+
+
+@pytest.mark.parametrize("kind", ["ar1", "var1"])
+@pytest.mark.parametrize("window", [None, 60])
+def test_recursive_dynamics_equals_refitting_at_every_origin(kind, window):
+    from yck.model.dns import recursive_dynamics
+
+    f = _simulate_var(np.array([[0.95, 0.03, 0.0], [0.0, 0.9, 0.05], [0.02, 0.0, 0.8]]),
+                      np.array([5.0, -1.5, 0.3]), T=300)
+    f.iloc[[40, 41, 150]] = np.nan  # gaps: pairs touching them must be skipped
+    origins = f.index[120::17]
+    fast = recursive_dynamics(f, origins, kind, window)
+    for t, d in zip(origins, fast):
+        hist = f.loc[:t] if window is None else f.loc[:t].iloc[-window:]
+        ref = fit_dynamics(hist, kind)
+        np.testing.assert_allclose(d.A, ref.A, atol=1e-10)
+        np.testing.assert_allclose(d.mu, ref.mu, atol=1e-8)
+        np.testing.assert_allclose(d.Q, ref.Q, atol=1e-10)
+        assert d.nobs == ref.nobs

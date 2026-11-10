@@ -197,3 +197,11 @@ def test_information_form_matches_covariance_form_with_non_diagonal_fallback():
     # A non-diagonal H takes the covariance-form path and still matches the reference.
     model.H = model.H + 0.0001 * (np.ones((6, 6)) - np.eye(6))
     assert kalman_loglik(model, y) == pytest.approx(kalman_filter(model, y).loglik, rel=1e-11)
+
+
+def test_compiled_filtered_states_match_reference():
+    from yck.model.kalman import filtered_states
+
+    model, y = _dns_like_system()
+    y = _with_gaps(y)
+    np.testing.assert_allclose(filtered_states(model, y), kalman_filter(model, y).a_filt, atol=1e-10)

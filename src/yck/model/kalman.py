@@ -480,6 +480,24 @@ def smoothed_stats(model: StateSpace, y) -> SmootherStats:
     return SmootherStats(float(out[0]), *out[1:])
 
 
+def filtered_states(model: StateSpace, y) -> np.ndarray:
+    """a_{t|t} for every t, from the compiled filter (same numbers as `kalman_filter(...).a_filt`).
+
+    Used by the backtests, which need many filter passes but only the filtered
+    states.
+    """
+    y = np.atleast_2d(np.asarray(y, dtype=float))
+    N, k = y.shape[0], model.T.shape[0]
+    f = lambda x: np.ascontiguousarray(x, dtype=float)
+    a_pred, P_pred = np.empty((N, k)), np.empty((N, k, k))
+    a_filt, P_filt = np.empty((N, k)), np.empty((N, k, k))
+    ll = _forward(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q), f(model.c),
+                  f(model.a1), f(model.P1), a_pred, P_pred, a_filt, P_filt)
+    if not np.isfinite(ll):
+        raise np.linalg.LinAlgError("filter failed: covariance not positive definite")
+    return a_filt
+
+
 def rts_smoother(model: StateSpace, res: FilterResult):
     """Rauch-Tung-Striebel smoother: E[x_t | all data] and its covariance, as (a_smooth, P_smooth).
 

@@ -177,6 +177,65 @@ def fit_dynamics(factors: pd.DataFrame, kind: str = "ar1") -> FactorDynamics:
     return FactorDynamics(mu=mu, A=A, Q=Q, nobs=n)
 
 
+def recursive_dynamics(factors: pd.DataFrame, origins, kind: str = "ar1",
+                       window: int | None = None) -> list[FactorDynamics]:
+    """`fit_dynamics(factors.loc[:t])` for every origin t, in O(1) per origin via prefix sums.
+
+    Re-running the regression at each origin costs O(t), so O(N^2) over a
+    backtest. The OLS solution depends on the data only through the sums
+    Szz = sum z z', Szy = sum z y', Syy = sum y y' over consecutive pairs
+    (z = (1, x_{s-1}), y = x_s). Cumulative sums of those give the sums for any
+    history [start, t] as C[t] - C[start], the prefix-sum trick, and a rolling
+    window of w months is the same with start = t - w + 1 (a sliding window).
+    Pairs touching a missing month contribute zero, exactly as in
+    `fit_dynamics`. The residual covariance also comes from the sums:
+    R = Syy - B'Szy - Szy'B + B'Szz B for the coefficient matrix B.
+    """
+    if kind not in ("ar1", "var1"):
+        raise ValueError("kind must be 'ar1' or 'var1'")
+    F = factors.to_numpy(float)
+    T, k = F.shape
+    ok = np.isfinite(F).all(axis=1)
+    pair = np.zeros(T, bool)
+    pair[1:] = ok[1:] & ok[:-1]
+    Z = np.zeros((T, k + 1))
+    Yv = np.zeros((T, k))
+    Z[pair, 0] = 1.0
+    Z[pair, 1:] = F[np.flatnonzero(pair) - 1]
+    Yv[pair] = F[pair]
+    # Prefix sums with a leading zero, so the sum over rows (lo, hi] is C[hi + 1] - C[lo + 1].
+    zero = lambda shape: np.zeros((1,) + shape)
+    Czz = np.concatenate([zero((k + 1, k + 1)), np.cumsum(np.einsum("ti,tj->tij", Z, Z), axis=0)])
+    Czy = np.concatenate([zero((k + 1, k)), np.cumsum(np.einsum("ti,tj->tij", Z, Yv), axis=0)])
+    Cyy = np.concatenate([zero((k, k)), np.cumsum(np.einsum("ti,tj->tij", Yv, Yv), axis=0)])
+    pos = {d: i for i, d in enumerate(factors.index)}
+    out = []
+    for t in origins:
+        i = pos[pd.Timestamp(t)]
+        first = 0 if not window else max(0, i - window + 1)
+        # Pairs (s-1, s) with first <= s-1 and s <= i, i.e. s in (first, i].
+        Szz = Czz[i + 1] - Czz[first + 1]
+        Szy = Czy[i + 1] - Czy[first + 1]
+        Syy = Cyy[i + 1] - Cyy[first + 1]
+        n = int(round(Szz[0, 0]))
+        if n < 10:
+            raise ValueError(f"only {n} usable consecutive pairs; need at least 10")
+        if kind == "var1":
+            B = np.linalg.solve(Szz, Szy)
+            n_par = k + 1
+        else:
+            B = np.zeros((k + 1, k))
+            for j in range(k):
+                sel = [0, 1 + j]
+                B[sel, j] = np.linalg.solve(Szz[np.ix_(sel, sel)], Szy[sel, j])
+            n_par = 2
+        R = Syy - B.T @ Szy - Szy.T @ B + B.T @ Szz @ B
+        c, A = B[0], B[1:].T
+        mu = np.linalg.solve(np.eye(k) - A, c)
+        out.append(FactorDynamics(mu=mu, A=A, Q=(R + R.T) / 2 / (n - n_par), nobs=n))
+    return out
+
+
 def forecast_yields(
     factors: pd.DataFrame,
     dynamics: FactorDynamics,

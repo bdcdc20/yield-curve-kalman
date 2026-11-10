@@ -61,8 +61,8 @@ from scipy.optimize import minimize
 
 from yck.model.dns import (DL_LAMBDA, FACTORS, fit_dynamics, fit_factors, fitted_yields, maturities_from_columns,
                            ns_loadings, ns_loadings_dlam)
-from yck.model.kalman import (FilterResult, SmootherStats, StateSpace, forecast_state, kalman_filter,
-                              rts_smoother, smoothed_stats, stationary_init)
+from yck.model.kalman import (FilterResult, SmootherStats, StateSpace, filtered_states, forecast_state,
+                              kalman_filter, rts_smoother, smoothed_stats, stationary_init)
 
 DIFFUSE_VAR = 100.0  # prior variance (pp^2) when A is not stable: wide relative to yield levels
 MACRO_H = 1e-8  # measurement variance of macro series: "observed without error", kept invertible
@@ -183,6 +183,10 @@ class DNSFit:
 
     def filter(self, data: pd.DataFrame) -> FilterResult:
         return kalman_filter(self.statespace(), data[self.columns].to_numpy(float))
+
+    def filtered_states(self, data: pd.DataFrame) -> np.ndarray:
+        """a_{t|t} for every row of `data`, from the compiled filter (fast; for backtests)."""
+        return filtered_states(self.statespace(), data[self.columns].to_numpy(float))
 
     def filtered_factors(self, data: pd.DataFrame) -> pd.DataFrame:
         """E[x_t | data up to t]: safe for forecasting."""
@@ -355,6 +359,8 @@ def fit_dns_mle(
     h_floor_bp: float | None = 1.0,
     n_starts: int = 1,
     seed: int = 0,
+    keep: int = 2,
+    prune_iters: int = 100,
     **kwargs,
 ) -> DNSFit:
     """Maximum-likelihood estimation of the DNS state-space model (yields only, or yields + macro).
@@ -364,8 +370,10 @@ def fit_dns_mle(
 
     Each start runs EM and then L-BFGS-B with the exact score (`_fit_from`).
     With `n_starts > 1`, the extra starts are random perturbations of the
-    first (fixed `seed`, so results are reproducible), and the
-    highest-likelihood fit is kept.
+    first (fixed `seed`, so results are reproducible). All starts are scouted
+    briefly (EM + `prune_iters` quasi-Newton iterations) and only the best
+    `keep` are run to convergence: branch-and-bound style pruning, which costs
+    a fraction of optimising every start fully.
 
     **Measurement-noise floor.** By default each maturity's noise sd is
     bounded below by `h_floor_bp` = 1 bp. Without it, the USD likelihood
@@ -379,14 +387,30 @@ def fit_dns_mle(
     """
     ycols, mcols = split_columns(data.columns)
     data = data[ycols + mcols]
+    n = len(ycols)
     p0 = start or two_step_start(data, lam)
+    if n_starts <= 1:
+        return _fit_from(data, n, p0, estimate_lambda, lam, h_floor_bp, **kwargs)
+
+    # Multistart with pruning. Every start gets EM plus a short quasi-Newton
+    # burst, which takes it to within ~1 log-likelihood point of its own optimum,
+    # while distinct optima are tens to hundreds of points apart. Only the best
+    # `keep` starts are then run to full convergence; the rest are abandoned.
     rng = np.random.default_rng(seed)
+    starts = [p0] + [_perturb(p0, rng) for _ in range(n_starts - 1)]
+    t0 = time.perf_counter()
+    scouted = [_fit_from(data, n, p, estimate_lambda, lam, h_floor_bp, maxiter=prune_iters, max_restarts=1,
+                         **{k: v for k, v in kwargs.items() if k not in ("maxiter", "max_restarts")})
+               for p in starts]
+    scouted.sort(key=lambda f: -f.loglik if np.isfinite(f.loglik) else np.inf)
     best = None
-    for i in range(n_starts):
-        p = p0 if i == 0 else _perturb(p0, rng)
-        fit = _fit_from(data, len(ycols), p, estimate_lambda, lam, h_floor_bp, **kwargs)
+    for f in scouted[:keep]:
+        fit = _fit_from(data, n, f.params, estimate_lambda, lam, h_floor_bp, em_iters=0,
+                        **{k: v for k, v in kwargs.items() if k != "em_iters"})
         if best is None or fit.loglik > best.loglik:
             best = fit
+    best.seconds = time.perf_counter() - t0
+    best.message = f"{n_starts} starts, best {keep} finished; " + best.message
     return best
 
 
@@ -411,6 +435,7 @@ def _fit_from(
     em_tol: float = 1e-2,
     maxiter: int = 5000,
     max_restarts: int = 10,
+    grad_tol: float = 0.005,
 ) -> DNSFit:
     """One start: EM, then L-BFGS-B with the exact score, restarted until it stops improving.
 
@@ -457,14 +482,21 @@ def _fit_from(
     # L-BFGS-B can declare convergence when its steps shrink on an ill-conditioned
     # surface; restarting resets its curvature memory. Stop when a restart gains
     # less than 1e-3 log-likelihood points.
+    # Stopping rules in log-likelihood units: converged when no parameter's
+    # gradient exceeds `grad_tol`, or an iteration gains < 1e-7. On USD refits
+    # this reaches the optimum of the old, much stricter settings to within
+    # 0.01 log-likelihood points at a fraction of the cost. A restart (which
+    # resets L-BFGS-B's curvature memory) is only spent when the run stopped with
+    # a large gradient, i.e. it stalled rather than converged.
+    opts = {"maxiter": maxiter, "maxfun": 2 * maxiter, "ftol": 1e-7 / n_obs, "gtol": grad_tol / n_obs}
     res = None
     restarts = 0
     for restarts in range(1, max_restarts + 1):
         r = minimize(fun, theta0 if res is None else res.x, jac=True, method="L-BFGS-B", bounds=bounds,
-                     options={"maxiter": maxiter, "maxfun": 2 * maxiter, "ftol": 1e-13, "gtol": 1e-8})
-        gain = np.inf if res is None else (res.fun - r.fun) * n_obs
+                     options=opts)
         res = r if res is None or r.fun < res.fun else res
-        if gain < 1e-3:
+        free = np.array([not (lo is not None and x <= lo + 1e-9) for x, (lo, _) in zip(res.x, bounds)])
+        if np.max(np.abs(res.jac[free]), initial=0.0) * n_obs < grad_tol:
             break
     params = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k)
     return DNSFit(params=params, loglik=-res.fun * n_obs, n_params=theta0.size, nobs=n_obs,

@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from yck.model.dns import DL_LAMBDA, fit_dynamics, fit_factors, maturities_from_columns, ns_loadings
+from yck.model.dns import DL_LAMBDA, fit_factors, maturities_from_columns, ns_loadings, recursive_dynamics
 from yck.model.statespace_dns import DNSFit, DNSParams, fit_dns_mle
 
 
@@ -58,11 +58,8 @@ def dns_two_step_forecasts(
     origins = factors.loc[first_origin:].dropna().index
 
     out: dict[int, list] = {h: [] for h in horizons}
-    for t in origins:
-        hist = factors.loc[:t]
-        if window:
-            hist = hist.iloc[-window:]
-        dyn = fit_dynamics(hist, kind)
+    # O(1) per origin via prefix sums; identical to fit_dynamics(factors.loc[:t]).
+    for t, dyn in zip(origins, recursive_dynamics(factors, origins, kind, window)):
         f_t = factors.loc[t].to_numpy()
         for h in horizons:
             out[h].append((_target(t, h), dyn.forecast(f_t, h) @ X.T))
@@ -74,7 +71,7 @@ def dns_two_step_forecasts(
     }
 
 
-FIT_CACHE_VERSION = 2  # bump when the estimator changes, so cached fits are not reused
+FIT_CACHE_VERSION = 3  # bump when the estimator changes, so cached fits are not reused
 
 
 def _cache_key(sample: pd.DataFrame, settings: dict) -> str:
@@ -188,10 +185,10 @@ def dns_kalman_forecasts(
     for fit, t_fit, t_next in zip(fitted, refit_at, refit_at[1:] + [None]):
         block = origins[(origins >= t_fit) & ((origins < t_next) if t_next is not None else True)]
         if macro is None:
-            a_filt = fit.filter(y).a_filt  # row s uses y up to s only
+            a_filt = fit.filtered_states(y)  # row s uses y up to s only
             states = {t: a_filt[pos[t]] for t in block}
         else:
-            states = {t: fit.filter(panel(t)).a_filt[-1] for t in block}
+            states = {t: fit.filtered_states(panel(t))[-1] for t in block}
         for t in block:
             for h in horizons:
                 out[h].append((_target(t, h), fit.forecast(states[t], h)))
