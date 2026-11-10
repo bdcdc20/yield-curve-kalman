@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+notebook = ["matplotlib>=3.8", "jupyter>=1.0", "nbconvert>=7"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
