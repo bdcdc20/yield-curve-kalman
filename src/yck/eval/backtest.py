@@ -82,7 +82,11 @@ def dns_kalman_forecasts(
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
     Parameters are re-estimated every `reestimate_every` origins (12 = yearly)
-    on data up to that origin, each time starting from the previous estimate.
+    on data up to that origin. Each re-estimation runs twice, from the two-step
+    estimates and from the previous estimate, and keeps the higher likelihood.
+    Warm starts alone are faster, but chained over many years they can drift
+    onto a worse local optimum: for USD the 2014 refit lost 175 log-likelihood
+    points that way. The cold start puts a floor under every refit.
     Between re-estimations the parameters are held fixed and the forecast
     starts from the *filtered* state a_{t|t}, which uses data up to t only.
     So no forecast ever sees data dated after its origin, even though one
@@ -100,14 +104,17 @@ def dns_kalman_forecasts(
     for i, t in enumerate(origins):
         if i % reestimate_every == 0:
             sample = y.loc[:t]
-            start = fit.params if fit else None
-            fit = fit_dns_mle(sample, start=start, estimate_lambda=estimate_lambda,
-                              lam=fit.params.lam if fit else lam)
+            cold = fit_dns_mle(sample, estimate_lambda=estimate_lambda, lam=lam)
+            warm = fit_dns_mle(sample, start=fit.params, estimate_lambda=estimate_lambda,
+                               lam=fit.params.lam) if fit else None
+            fit = warm if warm is not None and warm.loglik > cold.loglik else cold
             a_filt = fit.filter(y).a_filt  # row s uses y up to s only
             if fits is not None:
                 fits.append((t, fit))
             if verbose:
-                print(f"{t:%Y-%m}: loglik {fit.loglik:.1f}, lambda {fit.params.lam:.4f}, {fit.seconds:.0f}s", flush=True)
+                gap = f", warm-cold {warm.loglik - cold.loglik:+.1f}" if warm else ""
+                print(f"{t:%Y-%m}: loglik {fit.loglik:.1f}{gap}, lambda {fit.params.lam:.4f}, "
+                      f"{cold.seconds + (warm.seconds if warm else 0):.0f}s", flush=True)
         a_t = a_filt[pos[t]]
         for h in horizons:
             out[h].append((_target(t, h), fit.forecast(a_t, h)))
