@@ -16,14 +16,16 @@ evaluation protocol, the roadmap and the decisions already made.
 - Roadmap step 2 (`notebooks/01_two_step_usd.ipynb`, recursive backtest in
   `src/yck/eval/backtest.py`) is done; first results are in README §2.
 - Roadmap step 3 (`src/yck/model/kalman.py`, tested against statsmodels) is done.
-- Roadmap step 4 (ML DNS, `src/yck/model/statespace_dns.py`, notebook 02) is
-  done; results are in README §2. The optimiser is slow and stops early on
-  flat ridges (README §8, step 4b).
-- The next task is **roadmap step 4b**: EM + analytic score, parallel and
-  cached refits, and a `python -m yck backtest` command. Then forward
-  benchmarks (§7.4) and trading evaluation (§7.5).
-- Backtest outputs go in `data/results/` (git-ignored). A full USD Kalman
-  backtest currently takes 45–60 min, so run it in the background.
+- Roadmap steps 4 and 4b (ML DNS with EM + exact score, 1 bp noise floor,
+  multistart, parallel cached refits, `python -m yck backtest`) are done;
+  results are in README §2 and `notebooks/02_kalman_usd.ipynb`.
+- The next task is **roadmap step 5**: forward-rate panel in the data
+  pipeline and forward benchmark (README §7.4), then Diebold–Mariano and
+  Clark–West tests. Then trading evaluation (§7.5).
+- Backtest outputs go in `data/results/` (git-ignored), fits are cached in
+  `data/results/cache/`. Bump `FIT_CACHE_VERSION` in `eval/backtest.py`
+  whenever the estimator changes. Parallel code must live in importable
+  modules (macOS uses `spawn`), not in scripts piped through stdin.
 
 ## First-time setup check
 
@@ -32,7 +34,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 47 passed
+python3 -m pytest -q                  # expect 55 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```

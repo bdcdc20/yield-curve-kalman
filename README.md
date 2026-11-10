@@ -60,6 +60,7 @@ python3 -m yck fetch --refresh           # ignore the cache in data/raw and re-d
 python3 -m yck probe-ecb ICP             # list ECB dataflows whose id/name matches "ICP"
 python3 -m yck probe-ecb HICP "?"        # show the key dimensions of the HICP dataflow
 python3 -m yck probe-ecb HICP "M...000000..ANR"   # list matching series and their last date
+python3 -m yck backtest --ccy USD        # Kalman DNS out-of-sample forecasts -> data/results/ (cached, parallel)
 ```
 
 Notes:
@@ -81,12 +82,12 @@ As of 10 Nov 2026:
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 37 tests (parsers, DNS, backtest, Kalman filter vs statsmodels), all passing (`pytest -q`) |
+| Offline tests | **Done.** 55 tests (parsers, DNS, backtest, Kalman filter vs statsmodels and brute force, EM, exact score), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
 | Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; ~20 ms per likelihood on USD 1985– |
-| One-step maximum-likelihood DNS (yields only) | **Done, first version** (`notebooks/02_kalman_usd.ipynb`); optimiser speed/robustness to improve (§8, step 4b) |
+| One-step maximum-likelihood DNS (yields only) | **Done** (`statespace_dns.py`, `notebooks/02_kalman_usd.ipynb`). EM + exact score, 1 bp noise floor, multistart; full USD backtest ~15 min from scratch, seconds from cache |
 | Forward-rate and survey benchmarks, trading evaluation | Planned (§7.4, §7.5) |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
 | Rolling out-of-sample forecasts, benchmarks, tests | Not started |
@@ -123,22 +124,22 @@ not fix this. Can macro information correct it? That is the question for
 §6.4.
 
 **One-step Kalman / ML DNS (`notebooks/02_kalman_usd.ipynb`).** In-sample
-log-likelihood 13,373 (λ fixed) and 15,667 (λ estimated, 0.039), against
-11,168 at the two-step estimates. Out of sample (refit yearly, filtered
+log-likelihood 13,285 (λ fixed) and 15,396 (λ estimated, 0.039), with a
+1 bp noise floor, against 11,168 at the two-step estimates. Out of sample (refit yearly, filtered
 states), h = 12:
 
 | | 3m | 12m | 24m | 60m | 120m |
 |---|---|---|---|---|---|
 | Two-step VAR(1) | **0.88** | **0.96** | 1.02 | 1.12 | 1.07 |
-| Kalman, λ fixed | 0.92 | 1.00 | 1.07 | 1.20 | 1.17 |
-| Kalman, λ estimated | 0.93 | 1.00 | 1.07 | 1.18 | 1.20 |
+| Kalman, λ fixed | 0.91 | 1.00 | 1.07 | 1.19 | 1.14 |
+| Kalman, λ estimated | 0.94 | 1.01 | 1.07 | 1.17 | 1.19 |
 
 Better in-sample fit, worse forecasts. The estimated long-run level μ was
-6.3–8.4% in every refit while the 10y yield was mostly 1–5%, so the
-mean-reversion bias is stronger, not weaker (10y, h = 12, 2000–07: +66 bp
-vs +47 bp for the two-step VAR). The optimiser stops early on flat ridges
-(§8, step 4b), but this barely moves the forecasts: stuck vs corrected
-fits differ by 0.2–1.6 bp on average.
+6.1–8.3% in every refit while the 10y yield was mostly 1–5%, so the
+mean-reversion bias is stronger, not weaker (10y, h = 12, 2000–07: +61 bp
+vs +47 bp for the two-step VAR). An earlier numerical-gradient estimator
+often stopped short of the maximum, but its forecasts differed from these by
+only a few bp (RMSE ratios ≤ 0.03), so the conclusion is robust.
 
 ## 3. Repository layout
 
@@ -151,8 +152,9 @@ src/yck/
   data/curves.py            Svensson/Nelson-Siegel evaluation, month-end sampling
   data/build.py             orchestrates everything and writes data/processed + coverage.md
   model/dns.py              Nelson-Siegel loadings, two-step Diebold-Li estimation, factor dynamics, forecasts
-  model/kalman.py           generic Kalman filter (missing rows), log-likelihood, RTS smoother, stationary prior
-  eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), random walk, RMSE tables
+  model/kalman.py           Kalman filter (missing rows), log-likelihood, RTS smoother, smoother sufficient statistics (compiled)
+  model/statespace_dns.py   ML DNS: parameter transforms, EM, exact score, multistart L-BFGS-B, 1 bp noise floor
+  eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, RMSE tables
 notebooks/                  analysis notebooks, committed with outputs
 tests/                      offline tests: parsers (small samples in each source's real format), DNS, backtest
 .github/workflows/
@@ -304,8 +306,12 @@ Implementation notes:
   observed. This is how the GBP short-end gaps are handled.
 - **Likelihood:** the prediction-error decomposition, summing
   $-\tfrac12[\log|F_t| + v_t' F_t^{-1} v_t + n_t \log 2\pi]$. Maximise with
-  `scipy.optimize.minimize` (L-BFGS-B, then Nelder–Mead or BFGS polish).
-  Start from the two-step estimates.
+  EM (Shumway–Stoffer), then L-BFGS-B with the exact score (Fisher's
+  identity: the gradient of the expected complete-data log-likelihood, from
+  one smoother pass), from the two-step estimates plus random perturbations
+  (6 starts). Measurement-noise sd is bounded below by **1 bp**: without the
+  floor, some GSW maturities are fitted to ~0.01 bp, and the likelihood is
+  then too ill-conditioned to maximise reliably (§8, step 4b).
 - Write a small, own Kalman filter (numpy) and test it against
   `statsmodels.tsa.statespace` on simulated data. The custom code is part
   of the project's value and needs to handle missing rows.
@@ -470,24 +476,20 @@ premium), and that is the bar a model must clear.
 3. ✅ **`src/yck/model/kalman.py`:** a generic linear-Gaussian filter
    (predict, update with missing rows, log-likelihood) and an RTS smoother.
    Test it against `statsmodels` on simulated data, including missing rows.
-4. ✅ **`src/yck/model/statespace_dns.py`:** maximum-likelihood DNS (§6.3).
-   Model, compiled log-likelihood (numba) and recursive forecasts
-   (`eval/backtest.py`) are done. **Known issue:** numerical-gradient
-   L-BFGS-B stops early on flat ridges of the likelihood (a near-unit-root
-   level makes μ weakly identified; some measurement variances go to zero).
-   In the USD backtest, cold and warm starts disagree by up to ~230
-   log-likelihood points, and each refit currently keeps the better of the
-   two. Forecasts are insensitive to this (0.2–1.6 bp), but each USD
-   backtest takes 45–60 min. `notebooks/02_kalman_usd.ipynb` is done.
-   Remaining: step 4b.
-4b. **Robust and fast estimation.** EM (Shumway–Stoffer, closed-form
-   updates from the smoother) to get close to the optimum, then
-   quasi-Newton with an **analytic score** (one filter pass with
-   derivatives instead of ~37 passes for a numerical gradient). Test the
-   score against numerical gradients. Then run refits in parallel across
-   origins and cache them by (data, settings), so that a monthly update
-   re-estimates one origin rather than the whole history. A measurement-noise
-   floor (sd ≥ 1 bp) is kept as a robustness check, not the default.
+4. ✅ **`src/yck/model/statespace_dns.py`:** maximum-likelihood DNS (§6.3),
+   recursive forecasts (`eval/backtest.py`), `notebooks/02_kalman_usd.ipynb`.
+4b. ✅ **Robust and fast estimation.** Compiled filter + smoother returning
+   sufficient statistics; EM; exact score via Fisher's identity (tested
+   against numerical gradients and brute-force Gaussian conditioning);
+   L-BFGS-B with restarts; 6 starts per fit; 1 bp noise floor. What was
+   found: numerical-gradient L-BFGS-B stopped with large gradients, and
+   warm starts chained across refits drifted between local optima. The root
+   cause was near-zero noise variances (~0.01 bp) on some maturities, which
+   make the likelihood badly conditioned. With the floor, every fit
+   converges and starts agree on one or two optima. Refits are independent,
+   parallel and cached (`python -m yck backtest`): a full USD backtest
+   takes ~15 min on 8 cores from scratch (was 45–60 min per λ variant)
+   and seconds from the cache.
 5. **Benchmarks and tests (`src/yck/eval/`):** forward-rate panel in the
    data pipeline and forward benchmark (§7.4), optional SPF survey,
    Diebold–Mariano and Clark–West tests (§7.2), results tables (CSV +
