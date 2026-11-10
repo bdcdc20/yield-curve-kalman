@@ -356,7 +356,7 @@ the three latent factors plus real activity, inflation and the policy rate.
 
 | Comparison | Test | Why |
 |---|---|---|
-| Any model vs **random walk** ($\hat y_{t+h} = y_t$) | Diebold–Mariano (1995), HAC variance with Newey–West lag h−1 | RW is the standard hard-to-beat benchmark; not nested in DNS |
+| Any model vs **random walk** ($\hat y_{t+h} = y_t$) or **forwards** | Diebold–Mariano (1995) with the Harvey–Leybourne–Newbold (1997) small-sample correction, two-sided | RW and forwards are the standard hard-to-beat benchmarks; not nested in DNS |
 | **Yields + macro vs yields-only** | **Clark–West (2007)**, one-sided | Nested models: under the null, the larger model's extra parameter noise biases plain MSE comparisons against it |
 
 Clark–West adjusted loss differential, with model 1 the small (nested)
@@ -366,8 +366,18 @@ $$
 \hat f_{t+h} = e_{1,t+h}^2 - \left[e_{2,t+h}^2 - (\hat y_{1,t+h} - \hat y_{2,t+h})^2\right]
 $$
 
-Regress $\hat f$ on a constant with Newey–West standard errors (lag h−1)
+Regress $\hat f$ on a constant with HAC standard errors (lag h−1, see below)
 and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
+
+**Variance estimator (`src/yck/eval/stats.py`).** h-step forecasts made
+monthly overlap, so loss differentials are MA(h−1). The variance of their
+mean uses autocovariances up to lag h−1 with **equal (rectangular) weights**,
+as in Diebold & Mariano (1995), which is exact for that structure; Bartlett
+is the fallback if the estimate is not positive. Newey–West's Bartlett
+weights shrink those autocovariances, and in simulation (300 observations,
+h = 12) a nominal 5% test with them rejected 8–11% of the time. The
+rectangular estimator with the HLN correction rejects 5.5–6.5%
+(`tests/test_stats.py` checks this).
 
 ### 7.3 Real-time macro (no look-ahead)
 
@@ -414,8 +424,17 @@ instead ask whether it beats **what the market already prices**.
   walk (3m: 0.80 / 0.83 / 0.89 at h = 1 / 6 / 12), so the market's priced
   path for policy rates was informative. The best yields-only model (two-step
   VAR(1)) is within about ±1% of forwards at most points. Its clearest
-  edge is the 10y at h = 12 (RMSE 5% below forwards). Significance: see the
-  Diebold–Mariano results.
+  edge is the 10y at h = 12 (RMSE 5% below forwards).
+- **Significance (HLN-corrected DM, USD 2000–2026).** At h = 6 and 12,
+  *nothing* significantly beats the random walk. The short-end gains
+  (VAR(1) 3m: 0.84 / 0.88) are not significant. Only at h = 1 do forwards
+  (3m: 0.80, 1%) and the VAR(1) (3m: 0.86, 1%) beat it. **No yields-only
+  model beats forwards at any maturity or horizon.** At h = 1 they are
+  significantly worse at 3m and 5y; at h = 6 and 12 the VAR(1) is
+  statistically level (ratios 0.95–1.01). The DL AR(1) is significantly
+  worse than both benchmarks almost everywhere. In other words, the curve
+  alone contains nothing the market has not already priced, which makes
+  the macro model (§6.4) the real test.
 - **Surveys (USD, optional).** Philadelphia Fed Survey of Professional
   Forecasters: quarterly 3m T-bill and 10y Treasury forecasts (free).
 - Test every model against each benchmark with Diebold–Mariano (§7.2).
