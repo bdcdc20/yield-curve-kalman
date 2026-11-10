@@ -197,11 +197,15 @@ def test_macro_score_matches_numerical_gradient():
     theta = q.to_vector()
     g = score(theta, smoothed_stats(q.statespace(tau), Y), tau)
 
+    # Reference: the dense covariance-form filter. The fast information-form filter is
+    # accurate to ~1e-7 but carries ~1e-8 rounding noise when macro variances are 1e-8,
+    # which a 1e-6 finite-difference step would amplify.
     def ll(th):
-        return kalman_loglik(DNSParams.from_vector(th, len(GRID), k=5).statespace(tau), Y)
+        return kalman_filter(DNSParams.from_vector(th, len(GRID), k=5).statespace(tau), Y).loglik
 
     num = np.array([(ll(theta + e) - ll(theta - e)) / 2e-6 for e in np.eye(theta.size) * 1e-6])
     np.testing.assert_allclose(g, num, rtol=1e-4, atol=2e-3)
+    assert kalman_loglik(q.statespace(tau), Y) == pytest.approx(ll(theta), abs=1e-6)  # fast == reference
 
 
 @pytest.fixture(scope="module")

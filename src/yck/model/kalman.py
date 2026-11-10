@@ -164,8 +164,8 @@ def _chol_logdet(F):
 
 
 @_jit
-def _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
-    """The filter recursion, as in `kalman_filter`, for compiled callers.
+def _forward_dense(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
+    """Covariance-form filter (as in `kalman_filter`), used when H is not diagonal.
 
     Fills a_pred/P_pred/a_filt/P_filt in place (pass arrays with a zero
     leading dimension to skip storing) and returns the log-likelihood, or -inf
@@ -209,6 +209,151 @@ def _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
         a = c + T @ a
         P = T @ P @ T.T + Q
     return ll
+
+
+@_jit
+def _chol_inv_logdet(M):
+    """(inverse, log-determinant) of a small SPD matrix by Cholesky; (empty, nan) if not SPD."""
+    m = M.shape[0]
+    L = np.zeros((m, m))
+    for i in range(m):
+        for j in range(i + 1):
+            s = M[i, j]
+            for q in range(j):
+                s -= L[i, q] * L[j, q]
+            if i == j:
+                if not s > 0.0:
+                    return np.empty((0, 0)), np.nan
+                L[i, i] = np.sqrt(s)
+            else:
+                L[i, j] = s / L[j, j]
+    Linv = np.zeros((m, m))  # forward substitution: L Linv = I
+    for i in range(m):
+        Linv[i, i] = 1.0 / L[i, i]
+        for j in range(i):
+            s = 0.0
+            for q in range(j, i):
+                s -= L[i, q] * Linv[q, j]
+            Linv[i, j] = s / L[i, i]
+    return Linv.T @ Linv, 2.0 * np.log(np.diag(L)).sum()
+
+
+@_jit
+def _forward_info(y, Z, h, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
+    """The filter in information form, for diagonal H (all models in this project).
+
+    The covariance form factorises the n x n innovation covariance F_t each
+    month (O(n^3), n = 17 yields + macro). With H = diag(h), the Woodbury
+    identity and the matrix determinant lemma give everything from k x k
+    algebra (k = number of states):
+
+        M_t = P_{t|t-1}^{-1} + Z' H^{-1} Z          (k x k)
+        P_{t|t} = M_t^{-1},   a_{t|t} = a_{t|t-1} + M_t^{-1} Z' H^{-1} v_t
+        log|F_t| = sum log h + log|P_{t|t-1}| + log|M_t|
+        v' F^{-1} v = sum_j v_j (v_j - z_j (a_{t|t} - a_{t|t-1})) / h_j
+
+    The last form uses the post-update residual, so there is no cancellation
+    between two large numbers when some h_j are tiny (macro rows). Z' H^{-1} Z
+    depends only on which series are observed, so it is recomputed only when
+    that pattern changes from the previous month: in practice almost never.
+    """
+    N, n = y.shape
+    k = T.shape[0]
+    store = a_pred.shape[0] > 0
+    hinv = 1.0 / h
+    logh = np.log(h)
+    a = a1.copy()
+    P = P1.copy()
+    ll = 0.0
+    ZHZ = np.zeros((k, k))
+    sum_logh = 0.0
+    mask = np.zeros(n, np.bool_)
+    prev = np.zeros(n, np.bool_)
+    have = False
+    u = np.empty(k)
+    v = np.empty(n)
+    for t in range(N):
+        if store:
+            a_pred[t] = a
+            P_pred[t] = P
+        m = 0
+        same = have
+        for j in range(n):
+            ob = np.isfinite(y[t, j])
+            mask[j] = ob
+            if ob:
+                m += 1
+            if ob != prev[j]:
+                same = False
+        if m > 0:
+            if not same:  # observation pattern changed: rebuild Z' H^-1 Z for it
+                ZHZ[:, :] = 0.0
+                sum_logh = 0.0
+                for j in range(n):
+                    if mask[j]:
+                        sum_logh += logh[j]
+                        for r in range(k):
+                            zr = Z[j, r] * hinv[j]
+                            if zr != 0.0:
+                                for s_ in range(k):
+                                    ZHZ[r, s_] += zr * Z[j, s_]
+                prev[:] = mask
+                have = True
+            u[:] = 0.0
+            for j in range(n):
+                if mask[j]:
+                    vj = y[t, j] - d[j]
+                    for r in range(k):
+                        vj -= Z[j, r] * a[r]
+                    v[j] = vj
+                    w = hinv[j] * vj
+                    for r in range(k):
+                        u[r] += Z[j, r] * w
+            Pinv, logdet_P = _chol_inv_logdet(P)
+            if np.isnan(logdet_P):
+                return -np.inf
+            Minv, logdet_M = _chol_inv_logdet(Pinv + ZHZ)
+            if np.isnan(logdet_M):
+                return -np.inf
+            da = Minv @ u
+            quad = 0.0
+            for j in range(n):
+                if mask[j]:
+                    e = v[j]
+                    for r in range(k):
+                        e -= Z[j, r] * da[r]
+                    quad += hinv[j] * v[j] * e
+            a = a + da
+            P = 0.5 * (Minv + Minv.T)
+            ll += -0.5 * (m * LOG_2PI + sum_logh + logdet_P + logdet_M + quad)
+        if store:
+            a_filt[t] = a
+            P_filt[t] = P
+        a = c + T @ a
+        P = T @ P @ T.T + Q
+    return ll
+
+
+@_jit
+def _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
+    """Filter recursion: information form when H is diagonal, covariance form otherwise.
+
+    Fills a_pred/P_pred/a_filt/P_filt in place (pass arrays with a zero
+    leading dimension to skip storing) and returns the log-likelihood, or -inf
+    when the parameters make a covariance matrix not positive definite.
+    """
+    n = H.shape[0]
+    diag = True
+    for i in range(n):
+        for j in range(n):
+            if i != j and H[i, j] != 0.0:
+                diag = False
+    if diag:
+        hd = np.empty(n)
+        for i in range(n):
+            hd[i] = H[i, i]
+        return _forward_info(y, Z, hd, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt)
+    return _forward_dense(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt)
 
 
 @_jit

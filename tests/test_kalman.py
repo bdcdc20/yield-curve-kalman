@@ -184,3 +184,16 @@ def test_smoothed_stats_match_brute_force_conditioning():
         assert st.syy[j] == pytest.approx(sum((y[t, j] - model.d[j]) ** 2 for t in ts))
         np.testing.assert_allclose(st.sya[j], sum((y[t, j] - model.d[j]) * E(t) for t in ts), atol=1e-10)
         np.testing.assert_allclose(st.sxx[j], sum(Exx(t, t) for t in ts), atol=1e-10)
+
+
+def test_information_form_matches_covariance_form_with_non_diagonal_fallback():
+    from yck.model.kalman import smoothed_stats
+
+    model, y = _dns_like_system()
+    y = _with_gaps(y)
+    ref = kalman_filter(model, y)
+    st = smoothed_stats(model, y)  # information form (H diagonal)
+    assert st.loglik == pytest.approx(ref.loglik, rel=1e-11)
+    # A non-diagonal H takes the covariance-form path and still matches the reference.
+    model.H = model.H + 0.0001 * (np.ones((6, 6)) - np.eye(6))
+    assert kalman_loglik(model, y) == pytest.approx(kalman_filter(model, y).loglik, rel=1e-11)
