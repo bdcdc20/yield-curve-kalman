@@ -6,6 +6,11 @@
 # Diebold-Rudebusch-Aruoba (2006) / Diebold-Li (2006).
 maturities_months: [3, 6, 9, 12, 15, 18, 21, 24, 30, 36, 48, 60, 72, 84, 96, 108, 120]
 
+# Forecast horizons (months). The pipeline also stores curves at every extra
+# maturity that the forward-rate benchmark needs for these horizons: h itself
+# and tau + h for each grid maturity tau (README section 7.4).
+forecast_horizons_months: [1, 6, 12]
+
 curves:
   USD:
     # Gurkaynak-Sack-Wright (2007) Svensson fit, daily, 1961-present.

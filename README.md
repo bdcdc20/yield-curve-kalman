@@ -173,6 +173,7 @@ Further model and evaluation modules are planned in §8.
 | File | Content |
 |---|---|
 | `curves_{USD,EUR,GBP}.parquet` | Month-end zero-coupon yields in **percent, continuously compounded** (BoE: see 4.2). Index `date` = calendar month-end. Columns `3m, 6m, 9m, 12m, 15m, 18m, 21m, 24m, 30m, 36m, 48m, 60m, 72m, 84m, 96m, 108m, 120m` |
+| `curves_ext_{USD,EUR,GBP}.parquet` | The same month-end curves at every maturity the forward-rate benchmark needs (§7.4): the grid, each horizon h in `forecast_horizons_months`, and each grid τ + h (1m–132m). GBP: only maturities the BoE publishes (61/73/85/97/109/121m are not, so 1-month forwards for τ ≥ 60m are missing) |
 | `macro_{USD,EUR,GBP}.parquet` | Monthly `real_activity`, `inflation`, `policy_rate`, **latest vintage**, index = month-end. Transforms already applied (see table below) |
 | `vintages_USD.parquet` | ALFRED real-time history, long format: `series_id, date, realtime_start, realtime_end, value` (`realtime_end` of a still-current vintage is set to 2262-04-11) |
 | `coverage.md` | First/last date and in-range gaps for every series, plus cross-checks |
@@ -399,11 +400,22 @@ instead ask whether it beats **what the market already prices**.
   computed from the public curves keep the public-data rule. GSW and ECB
   curves are evaluated from their parameters at the extra maturities needed
   (e.g. 132m for the 10y yield 12 months ahead). For the BoE, use the
-  published maturities (to 40y). Build them in the data pipeline as
-  `forwards_{CCY}.parquet`.
+  published maturities (to 40y). The pipeline stores the needed maturities
+  in `curves_ext_{CCY}.parquet`; `eval.backtest.forward_forecasts` computes
+  the forwards. All three sources are continuously compounded. For the BoE
+  this was verified: forwards implied from its spot curve match its
+  published forward curve to < 0.1 bp, whereas semi-annual compounding
+  would be off by 6–9 bp.
 - **Expected result.** Forwards usually forecast *worse* than the random
   walk, because they include a term premium (Fama–Bliss 1987,
   Campbell–Shiller 1991). Diebold–Li (2006) find DNS beats forwards.
+- **USD result (2000–2026).** That holds only from 5y out (RMSE ratio to
+  RW 1.06–1.13 at h = 6, 12). At the short end forwards *beat* the random
+  walk (3m: 0.80 / 0.83 / 0.89 at h = 1 / 6 / 12), so the market's priced
+  path for policy rates was informative. The best yields-only model (two-step
+  VAR(1)) is within about ±1% of forwards at most points. Its clearest
+  edge is the 10y at h = 12 (RMSE 5% below forwards). Significance: see the
+  Diebold–Mariano results.
 - **Surveys (USD, optional).** Philadelphia Fed Survey of Professional
   Forecasters: quarterly 3m T-bill and 10y Treasury forecasts (free).
 - Test every model against each benchmark with Diebold–Mariano (§7.2).

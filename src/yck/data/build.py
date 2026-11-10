@@ -2,6 +2,7 @@
 
 Outputs (data/processed/):
     curves_{CCY}.parquet    month-end zero yields (%), columns '3m'..'120m'
+    curves_ext_{CCY}.parquet  same curves at every maturity the forward benchmark needs
     macro_{CCY}.parquet     monthly real_activity, inflation, policy_rate (latest vintage)
     vintages_USD.parquet    ALFRED real-time history for series with vintages: true
     coverage.md             date ranges, gaps and cross-checks for every series
@@ -27,10 +28,21 @@ def load_config(path: Path) -> dict:
 
 
 # --------------------------------------------------------------------------- curves
-def build_curve(ccy: str, spec: dict, grid: list[int], raw: Path, refresh: bool) -> tuple[pd.DataFrame, list[str]]:
-    """Returns the month-end curve on the grid, plus notes for the coverage report."""
+def forward_maturities(grid: list[int], horizons: list[int]) -> list[int]:
+    """Maturities needed to compute forwards F_t(h, tau) for every grid tau and horizon h.
+
+    F_t(h, tau) needs y_t(h) and y_t(tau + h), so this is the grid plus each
+    h plus each tau + h.
+    """
+    return sorted(set(grid) | set(horizons) | {m + h for m in grid for h in horizons})
+
+
+def build_curve(ccy: str, spec: dict, grid: list[int], raw: Path, refresh: bool,
+                horizons: list[int] = ()) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Returns the month-end curve on the grid, the extended curve for forwards, and report notes."""
     notes: list[str] = []
-    years = [m / 12 for m in grid]
+    grid_full = forward_maturities(grid, list(horizons))
+    years = [m / 12 for m in grid_full]
 
     if spec["source"] == "fed_gsw":
         daily = svensson_yield(src.fetch_gsw(spec["url"], raw, refresh), years)
@@ -61,18 +73,26 @@ def build_curve(ccy: str, spec: dict, grid: list[int], raw: Path, refresh: bool)
 
     elif spec["source"] == "boe_glc":
         wide = src.fetch_boe_glc(spec["url"], spec["sheets"], raw, refresh)
-        # Exact maturities only: grid points the BoE doesn't publish stay NaN.
-        daily = wide.reindex(columns=[float(m) for m in grid])
+        # Exact maturities only: points the BoE doesn't publish stay NaN.
+        daily = wide.reindex(columns=[float(m) for m in grid_full])
         daily.columns = years
         missing = [m for m in grid if float(m) not in set(wide.columns)]
         if missing:
             notes.append(f"BoE publishes no exact maturity for {missing} months (left as NaN)")
+        missing_fwd = [m for m in grid_full if m not in grid and float(m) not in set(wide.columns)]
+        if missing_fwd:
+            notes.append(f"Forward benchmark: BoE publishes no exact maturity for {missing_fwd} months, "
+                         "so forwards needing them are missing")
     else:
         raise ValueError(f"unknown curve source {spec['source']}")
 
-    monthly = month_end(daily)
+    # The grid panel is built on its own columns, so it is identical to what it
+    # would be without the extra maturities (month_end drops all-NaN rows).
+    monthly = month_end(daily[[m / 12 for m in grid]])
     monthly.columns = label_months(grid)
-    return monthly, notes
+    ext = month_end(daily)
+    ext.columns = label_months(grid_full)
+    return monthly, ext, notes
 
 
 # --------------------------------------------------------------------------- macro
@@ -134,8 +154,9 @@ def run(config_path: Path, data_dir: Path, only: list[str] | None = None, refres
         if only and ccy not in only:
             continue
         try:
-            curve, notes = build_curve(ccy, spec, grid, raw, refresh)
+            curve, ext, notes = build_curve(ccy, spec, grid, raw, refresh, cfg.get("forecast_horizons_months", []))
             curve.to_parquet(out / f"curves_{ccy}.parquet")
+            ext.to_parquet(out / f"curves_ext_{ccy}.parquet")
             report += coverage(f"{ccy} curve ({spec['source']})", curve) + [f"- {n}" for n in notes] + [""]
             log.info("%s curve: %s to %s", ccy, curve.index[0].date(), curve.index[-1].date())
         except Exception as e:

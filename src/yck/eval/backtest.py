@@ -197,6 +197,38 @@ def random_walk_forecasts(yields: pd.DataFrame, horizons=(1, 6, 12), first_origi
     return out
 
 
+def forward_forecasts(curves_ext: pd.DataFrame, columns, horizons=(1, 6, 12),
+                      first_origin: str = "2000-01-31") -> dict[int, pd.DataFrame]:
+    """Market-implied forecasts: the forward rate F_t(h, tau) as the forecast of y_{t+h}(tau).
+
+    With continuously compounded zero yields and maturities in months,
+
+        F_t(h, tau) = [(tau + h) y_t(tau + h) - h y_t(h)] / tau,
+
+    the yield that locks in today, for a tau-month loan starting in h months.
+    It is what the market prices, so a model has to beat it to be worth
+    trading on (README section 7.4). Short-rate futures price essentially
+    the same quantity, up to a convexity adjustment.
+
+    `curves_ext` must hold the needed maturities (the pipeline writes them
+    to curves_ext_{CCY}.parquet). A forward whose inputs are missing (e.g. a
+    maturity the BoE does not publish) is missing, never interpolated.
+    Indexed by target date, like the model forecasts.
+    """
+    base = curves_ext.loc[first_origin:]
+    out = {}
+    for h in horizons:
+        fc = pd.DataFrame(index=base.index, columns=list(columns), dtype=float)
+        for col in columns:
+            tau = maturities_from_columns([col])[0]
+            far, near = f"{int(tau + h)}m", f"{int(h)}m"
+            if far in base and near in base:
+                fc[col] = ((tau + h) * base[far] - h * base[near]) / tau
+        fc.index = pd.DatetimeIndex([_target(t, h) for t in base.index], name="date")
+        out[h] = fc
+    return out
+
+
 def rmse_table(forecasts: dict[str, pd.DataFrame], actual: pd.DataFrame) -> pd.DataFrame:
     """RMSE in basis points by maturity, one column per model, on a common sample.
 

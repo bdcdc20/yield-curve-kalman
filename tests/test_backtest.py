@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yck.eval.backtest import dns_kalman_forecasts, dns_two_step_forecasts, random_walk_forecasts, rmse_table
+from yck.eval.backtest import (dns_kalman_forecasts, dns_two_step_forecasts, forward_forecasts,
+                               random_walk_forecasts, rmse_table)
 from yck.model.dns import ns_loadings
 
 GRID = [3, 12, 24, 60, 120]
@@ -88,3 +89,25 @@ def test_kalman_forecasts_parallel_and_cache_reproduce_serial(tmp_path):
     y2.iloc[0, 0] += 0.01
     dns_kalman_forecasts(y2, cache_dir=tmp_path, **kw)
     assert len(list(tmp_path.glob("*.json"))) == 6
+
+
+# --------------------------------------------------------------------------- forward-rate benchmark
+def test_forward_of_flat_curve_is_flat_and_matches_hand_calculation():
+    idx = pd.date_range("2000-01-31", periods=3, freq="ME", name="date")
+    flat = pd.DataFrame(4.0, index=idx, columns=["1m", "6m", "12m", "13m", "18m", "24m"])
+    fw = forward_forecasts(flat, ["12m"], horizons=(1, 6, 12), first_origin=idx[0])
+    for h in (1, 6, 12):
+        np.testing.assert_allclose(fw[h]["12m"], 4.0)
+    # Upward-sloping: y(1m)=1, y(13m)=3 -> 12m rate starting in 1 month = (13*3 - 1*1)/12.
+    up = flat.assign(**{"1m": 1.0, "13m": 3.0})
+    assert forward_forecasts(up, ["12m"], horizons=(1,), first_origin=idx[0])[1]["12m"].iloc[0] == pytest.approx(38 / 12)
+
+
+def test_forward_missing_inputs_stay_missing_and_index_is_target_date():
+    idx = pd.date_range("2000-01-31", periods=3, freq="ME", name="date")
+    c = pd.DataFrame({"6m": [2.0, np.nan, 2.0], "12m": 2.5, "18m": 3.0}, index=idx)
+    fw = forward_forecasts(c, ["12m", "24m"], horizons=(6,), first_origin=idx[0])[6]
+    assert fw.index[0] == pd.Timestamp("2000-07-31")
+    assert np.isnan(fw["12m"].iloc[1])           # y(6m) missing that month
+    assert fw["24m"].isna().all()                # y(30m) not available at all
+    assert fw["12m"].iloc[0] == pytest.approx((18 * 3.0 - 6 * 2.0) / 12)
