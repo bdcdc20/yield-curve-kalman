@@ -86,7 +86,8 @@ As of 10 Nov 2026:
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
 | Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; ~20 ms per likelihood on USD 1985– |
-| One-step maximum-likelihood DNS (yields only) | **Next** |
+| One-step maximum-likelihood DNS (yields only) | **In progress.** Model and backtest loop done; optimiser convergence and speed to fix (§8, step 4b) |
+| Forward-rate and survey benchmarks, trading evaluation | Planned (§7.4, §7.5) |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
 | Rolling out-of-sample forecasts, benchmarks, tests | Not started |
 | Cross-currency comparison and write-up | Not started |
@@ -357,6 +358,88 @@ and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
   limitation.
 - `FEDFUNDS`, the ECB DFR and Bank Rate are known at month-end (lag 0).
 
+### 7.4 Market and survey benchmarks
+
+The random walk is a statistical yardstick. A user of the model would
+instead ask whether it beats **what the market already prices**.
+
+- **Forward rates (all currencies).** The curve at origin $t$ implies a
+  forecast of every future yield. With continuously compounded zero yields
+  in months,
+  $$
+  F_t(h, \tau) = \frac{(\tau + h)\, y_t(\tau + h) - h\, y_t(h)}{\tau}
+  $$
+  is the market-implied forecast of $y_{t+h}(\tau)$. Short-rate futures
+  (SOFR, fed funds, €STR, SONIA) price essentially the same quantity, up to
+  a small convexity adjustment, but their history is licensed. Forwards
+  computed from the public curves keep the public-data rule. GSW and ECB
+  curves are evaluated from their parameters at the extra maturities needed
+  (e.g. 132m for the 10y yield 12 months ahead). For the BoE, use the
+  published maturities (to 40y). Build them in the data pipeline as
+  `forwards_{CCY}.parquet`.
+- **Expected result.** Forwards usually forecast *worse* than the random
+  walk, because they include a term premium (Fama–Bliss 1987,
+  Campbell–Shiller 1991). Diebold–Li (2006) find DNS beats forwards.
+- **Surveys (USD, optional).** Philadelphia Fed Survey of Professional
+  Forecasters: quarterly 3m T-bill and 10y Treasury forecasts (free).
+- Test every model against each benchmark with Diebold–Mariano (§7.2).
+
+### 7.5 Trading evaluation (economic value)
+
+Lower RMSE does not by itself mean money can be made. A rates position
+already pays or earns the forward, so its P&L depends on the realised rate
+**relative to the forward**, not to today's rate. The trading signal is
+therefore
+
+$$
+s_t(h, \tau) = F_t(h, \tau) - \hat y_{t+h|t}(\tau)
+$$
+
+$s > 0$: the market prices higher rates than the model expects, so go long
+duration (receive fixed or buy futures); $s < 0$: the opposite. The random
+walk itself implies a trade, **carry / roll-down** (receive the term
+premium), and that is the bar a model must clear.
+
+- **Returns without licensed data.** h-month holding-period excess returns
+  of zero-coupon bonds come straight from the curves:
+  $rx_{t+h}(n) = n\,y_t(n) - (n-h)\,y_{t+h}(n-h) - h\,y_t(h)$ (in % over
+  the period, maturities in months). These approximate futures and swap
+  P&L. Real contracts add basis, roll and margin effects; state this as a
+  limitation.
+- **Strategies, mapped to DNS factors:**
+
+  | Strategy | Factor | Instruments it stands in for |
+  |---|---|---|
+  | Short-rate path vs forwards | short end (3m–12m) | SOFR / fed funds, €STR / Euribor, SONIA futures |
+  | Duration timing | level | Treasury TU/FV/TY, Schatz/Bobl/Bund, Gilt futures; swaps |
+  | Steepener / flattener, DV01-neutral | slope | futures pairs, swap curve trades |
+  | Butterfly (e.g. 2s5s10s) | curvature | three-leg futures or swaps |
+  | Cross-currency relative value | level/slope spreads | USD vs EUR vs GBP |
+
+  Factor-neutral portfolios are built from the Nelson–Siegel loadings, so
+  that each portfolio is exposed to one factor only.
+- **Sizing.** Position size is proportional to signal divided by forecast
+  variance. The Kalman model gives the forecast covariance
+  $Z P_{t+h|t} Z' + H$. Trade only when $|s|$ exceeds costs plus a
+  multiple of the forecast's standard error. Measure positions in DV01 and
+  target a fixed portfolio volatility.
+- **Benchmarks:** buy-and-hold duration, carry / roll-down (the
+  random-walk view), yields-only vs yields + macro.
+- **Metrics:** Sharpe ratio, maximum drawdown, hit rate, turnover,
+  certainty-equivalent return, all after costs (assume ~0.25–0.5 bp per
+  trade for short-rate futures and <0.5 bp for bond futures; report
+  sensitivity to the assumption).
+- **Literature:** Thornton & Valente (2012) find that statistical
+  predictability of bond returns gave no economic value over forwards.
+  Gargano, Pettenuzzo & Timmermann (2019) find value when macro information
+  is used. The research question (does macro help?) is answered both in
+  RMSE and in P&L.
+- **Caveats to report:** the mean-reversion bias of §2 would have kept a
+  model short duration through the 2000–2015 bond rally; regime changes
+  (zero lower bound, 2022 hikes); GSW curves are smoothed and exclude
+  on-the-run bonds. A positive result means "worth testing on contract
+  data", not "ready to trade".
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -369,15 +452,37 @@ and reject the null of equal accuracy if t > 1.282 (10%) or t > 1.645 (5%).
 3. ✅ **`src/yck/model/kalman.py`:** a generic linear-Gaussian filter
    (predict, update with missing rows, log-likelihood) and an RTS smoother.
    Test it against `statsmodels` on simulated data, including missing rows.
-4. **`src/yck/model/statespace_dns.py`:** parameter packing/unpacking,
-   maximum-likelihood estimation of §6.3, then the macro extension of §6.4.
-5. **`src/yck/eval/`:** forecasting loop (§7.1), real-time macro panels
-   (§7.3), RW benchmark, Diebold–Mariano and Clark–West tests, results
-   tables (CSV + markdown).
-6. Run for USD, then EUR and GBP. Cross-currency comparison.
-7. Write-up in `README.md` (results section): headline table of RMSE
-   ratios against RW and the CW statistics, plus factor and impulse-response
-   charts.
+4. 🔶 **`src/yck/model/statespace_dns.py`:** maximum-likelihood DNS (§6.3).
+   Model, compiled log-likelihood (numba) and recursive forecasts
+   (`eval/backtest.py`) are done. **Known issue:** numerical-gradient
+   L-BFGS-B stops early on flat ridges of the likelihood (a near-unit-root
+   level makes μ weakly identified; some measurement variances go to zero).
+   In the USD backtest, cold and warm starts disagree by up to ~230
+   log-likelihood points, and each refit currently keeps the better of the
+   two. Remaining: `notebooks/02_kalman_usd.ipynb`, and step 4b.
+4b. **Robust and fast estimation.** EM (Shumway–Stoffer, closed-form
+   updates from the smoother) to get close to the optimum, then
+   quasi-Newton with an **analytic score** (one filter pass with
+   derivatives instead of ~37 passes for a numerical gradient). Test the
+   score against numerical gradients. Then run refits in parallel across
+   origins and cache them by (data, settings), so that a monthly update
+   re-estimates one origin rather than the whole history. A measurement-noise
+   floor (sd ≥ 1 bp) is kept as a robustness check, not the default.
+5. **Benchmarks and tests (`src/yck/eval/`):** forward-rate panel in the
+   data pipeline and forward benchmark (§7.4), optional SPF survey,
+   Diebold–Mariano and Clark–West tests (§7.2), results tables (CSV +
+   markdown).
+6. **Trading evaluation (`src/yck/eval/trading.py`, §7.5):** excess
+   returns from the curves, carry / roll-down benchmark, then strategies,
+   short-rate vs forwards first, then duration, curve and fly, with
+   variance-based sizing, costs, Sharpe and certainty-equivalent return.
+7. **Yields + macro (§6.4)** with real-time macro (§7.3). Rerun 5 and 6 for
+   it. The headline result is macro vs no macro in both RMSE and P&L.
+8. Run for USD, then EUR and GBP. Cross-currency comparison, including
+   cross-currency relative-value trades.
+9. Write-up in `README.md` (results section): RMSE ratios against RW and
+   forwards, DM/CW statistics, strategy performance after costs, plus factor
+   and impulse-response charts.
 
 Dependencies: `scipy` is core; `statsmodels` is in `dev` (test reference
 only); `matplotlib` and `jupyter` are in the `notebook` extra.
