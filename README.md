@@ -86,7 +86,7 @@ As of 10 Nov 2026:
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
 | Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; ~20 ms per likelihood on USD 1985– |
-| One-step maximum-likelihood DNS (yields only) | **In progress.** Model and backtest loop done; optimiser convergence and speed to fix (§8, step 4b) |
+| One-step maximum-likelihood DNS (yields only) | **Done, first version** (`notebooks/02_kalman_usd.ipynb`); optimiser speed/robustness to improve (§8, step 4b) |
 | Forward-rate and survey benchmarks, trading evaluation | Planned (§7.4, §7.5) |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
 | Rolling out-of-sample forecasts, benchmarks, tests | Not started |
@@ -121,6 +121,24 @@ historical mean, so they ran too high in 2000–2015. For example, the mean
 for the AR(1), against +20 / +31 bp for the RW. A rolling 10y window does
 not fix this. Can macro information correct it? That is the question for
 §6.4.
+
+**One-step Kalman / ML DNS (`notebooks/02_kalman_usd.ipynb`).** In-sample
+log-likelihood 13,373 (λ fixed) and 15,667 (λ estimated, 0.039), against
+11,168 at the two-step estimates. Out of sample (refit yearly, filtered
+states), h = 12:
+
+| | 3m | 12m | 24m | 60m | 120m |
+|---|---|---|---|---|---|
+| Two-step VAR(1) | **0.88** | **0.96** | 1.02 | 1.12 | 1.07 |
+| Kalman, λ fixed | 0.92 | 1.00 | 1.07 | 1.20 | 1.17 |
+| Kalman, λ estimated | 0.93 | 1.00 | 1.07 | 1.18 | 1.20 |
+
+Better in-sample fit, worse forecasts. The estimated long-run level μ was
+6.3–8.4% in every refit while the 10y yield was mostly 1–5%, so the
+mean-reversion bias is stronger, not weaker (10y, h = 12, 2000–07: +66 bp
+vs +47 bp for the two-step VAR). The optimiser stops early on flat ridges
+(§8, step 4b), but this barely moves the forecasts: stuck vs corrected
+fits differ by 0.2–1.6 bp on average.
 
 ## 3. Repository layout
 
@@ -452,14 +470,16 @@ premium), and that is the bar a model must clear.
 3. ✅ **`src/yck/model/kalman.py`:** a generic linear-Gaussian filter
    (predict, update with missing rows, log-likelihood) and an RTS smoother.
    Test it against `statsmodels` on simulated data, including missing rows.
-4. 🔶 **`src/yck/model/statespace_dns.py`:** maximum-likelihood DNS (§6.3).
+4. ✅ **`src/yck/model/statespace_dns.py`:** maximum-likelihood DNS (§6.3).
    Model, compiled log-likelihood (numba) and recursive forecasts
    (`eval/backtest.py`) are done. **Known issue:** numerical-gradient
    L-BFGS-B stops early on flat ridges of the likelihood (a near-unit-root
    level makes μ weakly identified; some measurement variances go to zero).
    In the USD backtest, cold and warm starts disagree by up to ~230
    log-likelihood points, and each refit currently keeps the better of the
-   two. Remaining: `notebooks/02_kalman_usd.ipynb`, and step 4b.
+   two. Forecasts are insensitive to this (0.2–1.6 bp), but each USD
+   backtest takes 45–60 min. `notebooks/02_kalman_usd.ipynb` is done.
+   Remaining: step 4b.
 4b. **Robust and fast estimation.** EM (Shumway–Stoffer, closed-form
    updates from the smoother) to get close to the optimum, then
    quasi-Newton with an **analytic score** (one filter pass with

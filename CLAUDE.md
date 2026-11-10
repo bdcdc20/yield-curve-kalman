@@ -16,8 +16,14 @@ evaluation protocol, the roadmap and the decisions already made.
 - Roadmap step 2 (`notebooks/01_two_step_usd.ipynb`, recursive backtest in
   `src/yck/eval/backtest.py`) is done; first results are in README §2.
 - Roadmap step 3 (`src/yck/model/kalman.py`, tested against statsmodels) is done.
-- The next task is **roadmap step 4: `src/yck/model/statespace_dns.py`**, the
-  maximum-likelihood DNS of README §6.3, started from the two-step estimates.
+- Roadmap step 4 (ML DNS, `src/yck/model/statespace_dns.py`, notebook 02) is
+  done; results are in README §2. The optimiser is slow and stops early on
+  flat ridges (README §8, step 4b).
+- The next task is **roadmap step 4b**: EM + analytic score, parallel and
+  cached refits, and a `python -m yck backtest` command. Then forward
+  benchmarks (§7.4) and trading evaluation (§7.5).
+- Backtest outputs go in `data/results/` (git-ignored). A full USD Kalman
+  backtest currently takes 45–60 min, so run it in the background.
 
 ## First-time setup check
 
@@ -26,7 +32,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 37 passed
+python3 -m pytest -q                  # expect 47 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```
