@@ -56,6 +56,19 @@ def ns_loadings(tau, lam: float = DL_LAMBDA) -> np.ndarray:
     return np.column_stack([np.ones_like(x), slope, curv])
 
 
+def ns_loadings_dlam(tau, lam: float = DL_LAMBDA) -> np.ndarray:
+    """d(loadings)/d(lambda), shape (len(tau), 3), for the analytic score when lambda is estimated.
+
+    With x = lam*tau and s(x) = (1-e^{-x})/x: ds/dx = (e^{-x}(1+x) - 1)/x^2
+    (-> -1/2 as x -> 0), d(s - e^{-x})/dx = ds/dx + e^{-x}, and d/dlam = tau d/dx.
+    """
+    tau = np.asarray(tau, dtype=float)
+    x = lam * tau
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ds = np.where(x < 1e-6, -0.5 + x / 3.0, (np.exp(-x) * (1.0 + x) - 1.0) / x**2)
+    return np.column_stack([np.zeros_like(x), tau * ds, tau * (ds + np.exp(-x))])
+
+
 def fit_factors(yields: pd.DataFrame, lam: float = DL_LAMBDA, min_obs: int = 3) -> pd.DataFrame:
     """Step 1: OLS of each month's yields on the loadings -> (level, slope, curvature).
 

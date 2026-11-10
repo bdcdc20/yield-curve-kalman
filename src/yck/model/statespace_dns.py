@@ -56,9 +56,11 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from scipy.linalg import solve_discrete_lyapunov
 from scipy.optimize import minimize
 
-from yck.model.dns import DL_LAMBDA, FACTORS, fit_dynamics, fit_factors, fitted_yields, maturities_from_columns, ns_loadings
+from yck.model.dns import (DL_LAMBDA, FACTORS, fit_dynamics, fit_factors, fitted_yields, maturities_from_columns,
+                           ns_loadings, ns_loadings_dlam)
 from yck.model.kalman import (FilterResult, SmootherStats, StateSpace, forecast_state, kalman_filter,
                               rts_smoother, smoothed_stats, stationary_init)
 
@@ -239,15 +241,9 @@ def expected_complete_loglik(theta, st: SmootherStats, tau, estimate_lambda: boo
     return float(ll)
 
 
-def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: float = DL_LAMBDA,
-          eps: float = 1e-5) -> np.ndarray:
-    """Exact gradient of the log-likelihood at theta (Fisher's identity).
-
-    Differentiates the closed-form expected complete-data log-likelihood with
-    the smoother statistics held fixed. Central differences are accurate here
-    (errors ~1e-9) because that function is smooth and costs microseconds;
-    no filter is re-run.
-    """
+def score_fd(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: float = DL_LAMBDA,
+             eps: float = 1e-5) -> np.ndarray:
+    """Reference score: central differences of `expected_complete_loglik` (slow; used to test `score`)."""
     theta = np.asarray(theta, float)
     g = np.empty_like(theta)
     for i in range(theta.size):
@@ -256,6 +252,74 @@ def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: flo
         g[i] = (expected_complete_loglik(theta + e, st, tau, estimate_lambda, lam)
                 - expected_complete_loglik(theta - e, st, tau, estimate_lambda, lam)) / (2 * eps)
     return g
+
+
+def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: float = DL_LAMBDA) -> np.ndarray:
+    """Exact gradient of the log-likelihood at theta, in closed form (Fisher's identity).
+
+    The gradient of the log-likelihood equals the gradient of the expected
+    complete-data log-likelihood with the smoother statistics held fixed.
+    Each of its terms has a matrix-calculus derivative:
+
+    - measurement: d/dlog h_j = -1/2 (n_j - S_j / h_j); for lambda, S_j depends on
+      the loadings Z_j(lambda) and d/dlambda uses `ns_loadings_dlam`;
+    - transition: d/dB = Q^{-1} (S10 - B S00) with B = [c, A], c = (I - A) mu, and
+      d/dQ = -1/2 [(N-1) Q^{-1} - Q^{-1} W Q^{-1}];
+    - first state x_1 ~ N(mu, P1), where P1 solves P1 = A P1 A' + Q: d/dmu =
+      P1^{-1} (E x_1 - mu); with G = d/dP1, one adjoint Lyapunov solve
+      Lam = A' Lam A + G gives d/dQ += Lam and d/dA += 2 Lam A P1.
+
+    Q = L L' with log-diagonal L maps through d/dL = 2 G_Q L. Tested against
+    `score_fd` and against numerical gradients of the Kalman log-likelihood.
+    """
+    n = len(tau)
+    k = st.S11.shape[0]
+    p = DNSParams.from_vector(theta, n, estimate_lambda, lam, k)
+    ss = p.statespace(tau)
+    A, mu = p.A, p.mu
+    Ik = np.eye(k)
+
+    # Measurement (yield rows only).
+    Z = ss.Z[:n, :3]
+    sya, sxx = st.sya[:n, :3], st.sxx[:n, :3, :3]
+    S = st.syy[:n] - 2.0 * np.einsum("jk,jk->j", Z, sya) + np.einsum("jk,jkl,jl->j", Z, sxx, Z)
+    g_logh = -0.5 * (st.n_i[:n] - S / p.h)
+
+    # Transition.
+    _, Qinv = _logdet_and_inv(p.Q)
+    B = np.column_stack([ss.c, A])
+    W = st.S11 - B @ st.S10.T - st.S10 @ B.T + B @ st.S00 @ B.T
+    dB = Qinv @ (st.S10 - B @ st.S00)
+    dc, dA = dB[:, 0], dB[:, 1:].copy()
+    dmu = (Ik - A).T @ dc
+    dA -= np.outer(dc, mu)
+    dQ = -0.5 * (st.n_trans * Qinv - Qinv @ W @ Qinv)
+
+    # First state.
+    x1 = st.a_s[0]
+    _, P1inv = _logdet_and_inv(ss.P1)
+    dmu += P1inv @ (x1 - ss.a1)
+    if np.max(np.abs(np.linalg.eigvals(A))) < 1.0:  # stationary prior: P1 depends on A and Q
+        M = np.outer(x1 - ss.a1, x1 - ss.a1) + st.P_s[0]
+        G1 = -0.5 * (P1inv - P1inv @ M @ P1inv)
+        Lam = solve_discrete_lyapunov(A.T, G1)
+        Lam = (Lam + Lam.T) / 2
+        dQ += Lam
+        dA += 2.0 * Lam @ A @ ss.P1
+
+    # Q = L L' with log diagonal.
+    (rows, cols), diag = _tril(k)
+    Lq = np.linalg.cholesky(p.Q)
+    dQ = (dQ + dQ.T) / 2
+    dL = (2.0 * dQ @ Lq)[rows, cols]
+    dL[diag] *= Lq[rows, cols][diag]
+
+    parts = [dmu, dA.ravel(), dL, g_logh]
+    if estimate_lambda:
+        dZ = ns_loadings_dlam(tau, p.lam)
+        dS = -2.0 * np.einsum("jk,jk->j", dZ, sya) + 2.0 * np.einsum("jk,jkl,jl->j", dZ, sxx, Z)
+        parts.append([p.lam * np.sum(-0.5 * dS / p.h)])
+    return np.concatenate(parts)
 
 
 def em_update(p: DNSParams, st: SmootherStats, tau, h_min: float = 1e-10) -> DNSParams:

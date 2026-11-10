@@ -229,3 +229,36 @@ def test_yields_only_is_the_special_case_without_macro_columns(dra_fit):
     data, _, _, _ = dra_fit
     fit = fit_dns_mle(data[COLS])
     assert fit.params.k == 3 and fit.columns == COLS
+
+
+# --------------------------------------------------------------------------- analytic score
+@pytest.mark.parametrize("case", ["yields", "yields-lambda", "macro", "unstable-A"])
+def test_analytic_score_equals_finite_difference_score(case):
+    from yck.model.kalman import smoothed_stats
+    from yck.model.statespace_dns import score, score_fd
+
+    tau = np.array(GRID, float)
+    if case.startswith("yields"):
+        y, _ = _simulate(TRUE, N=120, seed=13)
+        y.iloc[::5, :2] = np.nan
+        Y = y.to_numpy()
+        q = DNSParams(TRUE.mu + [0.3, -0.2, 0.1], TRUE.A * 0.98, TRUE.Q * 1.3, TRUE.h * 0.7, lam=0.07)
+    else:
+        data, p, _ = _simulate_dra(N=120)
+        Y = data.to_numpy()
+        q = DNSParams(p.mu + 0.2, p.A * 0.97, p.Q * 1.4, p.h * 0.6, p.lam)
+    if case == "unstable-A":  # diffuse prior branch: P1 no longer depends on A, Q
+        q = DNSParams(q.mu, q.A + np.eye(q.k) * 0.1, q.Q, q.h, q.lam)
+        assert np.max(np.abs(np.linalg.eigvals(q.A))) >= 1
+    est = case == "yields-lambda"
+    theta = q.to_vector(est)
+    st = smoothed_stats(q.statespace(tau), Y)
+    np.testing.assert_allclose(score(theta, st, tau, est, q.lam), score_fd(theta, st, tau, est, q.lam),
+                               rtol=1e-5, atol=1e-4)
+
+
+def test_lambda_derivative_of_loadings():
+    from yck.model.dns import ns_loadings_dlam
+    tau = np.array([0.5, 3, 30, 120, 400.0])
+    num = (ns_loadings(tau, 0.06 + 1e-7) - ns_loadings(tau, 0.06 - 1e-7)) / 2e-7
+    np.testing.assert_allclose(ns_loadings_dlam(tau, 0.06), num, rtol=1e-6, atol=1e-8)
