@@ -13,11 +13,17 @@ up directly with the realised curve and with other models' forecasts.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import time
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from yck.model.dns import DL_LAMBDA, fit_dynamics, fit_factors, maturities_from_columns, ns_loadings
-from yck.model.statespace_dns import DNSFit, fit_dns_mle
+from yck.model.statespace_dns import DNSFit, DNSParams, fit_dns_mle
 
 
 def _target(origin: pd.Timestamp, h: int) -> pd.Timestamp:
@@ -68,6 +74,43 @@ def dns_two_step_forecasts(
     }
 
 
+FIT_CACHE_VERSION = 2  # bump when the estimator changes, so cached fits are not reused
+
+
+def _cache_key(sample: pd.DataFrame, settings: dict) -> str:
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(sample.to_numpy(float)).tobytes())
+    h.update(np.asarray(sample.index.asi8).tobytes())
+    h.update(json.dumps({"cols": list(sample.columns), "v": FIT_CACHE_VERSION, **settings}, sort_keys=True).encode())
+    return h.hexdigest()[:24]
+
+
+def _fit_to_json(fit: DNSFit) -> dict:
+    p = fit.params
+    return {"mu": p.mu.tolist(), "A": p.A.tolist(), "Q": p.Q.tolist(), "h": p.h.tolist(), "lam": p.lam,
+            "loglik": fit.loglik, "n_params": fit.n_params, "nobs": fit.nobs, "converged": fit.converged,
+            "message": fit.message, "seconds": fit.seconds, "columns": fit.columns,
+            "estimate_lambda": fit.estimate_lambda}
+
+
+def _fit_from_json(d: dict) -> DNSFit:
+    params = DNSParams(mu=np.array(d["mu"]), A=np.array(d["A"]), Q=np.array(d["Q"]), h=np.array(d["h"]), lam=d["lam"])
+    return DNSFit(params=params, **{k: d[k] for k in ("loglik", "n_params", "nobs", "converged", "message",
+                                                     "seconds", "columns", "estimate_lambda")})
+
+
+def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> DNSFit:
+    """Fit one re-estimation origin, reading or writing the on-disk cache. Top-level so workers can pickle it."""
+    path = Path(cache_dir) / f"{_cache_key(sample, settings)}.json" if cache_dir else None
+    if path is not None and path.exists():
+        return _fit_from_json(json.loads(path.read_text()))
+    fit = fit_dns_mle(sample, **settings)
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_fit_to_json(fit)))
+    return fit
+
+
 def dns_kalman_forecasts(
     yields: pd.DataFrame,
     horizons=(1, 6, 12),
@@ -76,48 +119,62 @@ def dns_kalman_forecasts(
     reestimate_every: int = 12,
     estimate_lambda: bool = False,
     lam: float = DL_LAMBDA,
+    h_floor_bp: float | None = 1.0,
+    n_starts: int = 6,
+    jobs: int = 1,
+    cache_dir: str | Path | None = None,
     fits: list | None = None,
     verbose: bool = False,
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
     Parameters are re-estimated every `reestimate_every` origins (12 = yearly)
-    on data up to that origin. Each re-estimation runs twice, from the two-step
-    estimates and from the previous estimate, and keeps the higher likelihood.
-    Warm starts alone are faster, but chained over many years they can drift
-    onto a worse local optimum: for USD the 2014 refit lost 175 log-likelihood
-    points that way. The cold start puts a floor under every refit.
+    on data up to that origin. Each re-estimation is independent: it uses
+    `n_starts` starting points (the two-step estimates plus random
+    perturbations) and keeps the best fit. So the re-estimations can run in
+    parallel (`jobs` processes), and the result does not depend on the order
+    they run in. Earlier versions warm-started each refit from the previous
+    one; chained over many years, that drifted between local optima.
+
     Between re-estimations the parameters are held fixed and the forecast
     starts from the *filtered* state a_{t|t}, which uses data up to t only.
     So no forecast ever sees data dated after its origin, even though one
     filter pass covers the whole sample.
 
-    If `fits` is a list, each (origin, DNSFit) is appended to it, so parameter
-    stability can be inspected afterwards.
+    Fits are cached in `cache_dir` (one JSON file per origin, keyed by a hash
+    of the exact data and settings). Re-running with unchanged data, or after
+    a new month arrives, only fits what is new.
+
+    If `fits` is a list, each (origin, DNSFit) is appended to it.
     """
     y = yields.loc[est_start:] if est_start else yields
     origins = y.loc[first_origin:].index
+    refit_at = list(origins[::reestimate_every])
+    settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
+    cache = str(cache_dir) if cache_dir else None
+    samples = [y.loc[:t] for t in refit_at]
+
+    t0 = time.perf_counter()
+    if jobs > 1:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            fitted = list(ex.map(_fit_origin, samples, [settings] * len(samples), [cache] * len(samples)))
+    else:
+        fitted = [_fit_origin(s, settings, cache) for s in samples]
+    if verbose:
+        for t, f in zip(refit_at, fitted):
+            print(f"{t:%Y-%m}: loglik {f.loglik:.1f}, lambda {f.params.lam:.4f}, {f.seconds:.0f}s ({f.message[:30]})")
+        print(f"{len(fitted)} fits in {time.perf_counter() - t0:.0f}s wall time", flush=True)
+    if fits is not None:
+        fits.extend(zip(refit_at, fitted))
+
     pos = {d: i for i, d in enumerate(y.index)}
     out: dict[int, list] = {h: [] for h in horizons}
-    fit: DNSFit | None = None
-    a_filt = None
-    for i, t in enumerate(origins):
-        if i % reestimate_every == 0:
-            sample = y.loc[:t]
-            cold = fit_dns_mle(sample, estimate_lambda=estimate_lambda, lam=lam)
-            warm = fit_dns_mle(sample, start=fit.params, estimate_lambda=estimate_lambda,
-                               lam=fit.params.lam) if fit else None
-            fit = warm if warm is not None and warm.loglik > cold.loglik else cold
-            a_filt = fit.filter(y).a_filt  # row s uses y up to s only
-            if fits is not None:
-                fits.append((t, fit))
-            if verbose:
-                gap = f", warm-cold {warm.loglik - cold.loglik:+.1f}" if warm else ""
-                print(f"{t:%Y-%m}: loglik {fit.loglik:.1f}{gap}, lambda {fit.params.lam:.4f}, "
-                      f"{cold.seconds + (warm.seconds if warm else 0):.0f}s", flush=True)
-        a_t = a_filt[pos[t]]
-        for h in horizons:
-            out[h].append((_target(t, h), fit.forecast(a_t, h)))
+    for fit, t_fit, t_next in zip(fitted, refit_at, refit_at[1:] + [None]):
+        a_filt = fit.filter(y).a_filt  # row s uses y up to s only
+        block = origins[(origins >= t_fit) & ((origins < t_next) if t_next is not None else True)]
+        for t in block:
+            for h in horizons:
+                out[h].append((_target(t, h), fit.forecast(a_filt[pos[t]], h)))
     return {
         h: pd.DataFrame(np.array([v for _, v in rows]), index=pd.DatetimeIndex([d for d, _ in rows], name="date"),
                         columns=y.columns)

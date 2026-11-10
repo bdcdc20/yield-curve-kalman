@@ -124,3 +124,63 @@ def test_fast_loglik_rejects_invalid_parameters():
     model, y = _dns_like_system(N=20)
     model.H = -np.eye(6)  # makes F_t indefinite
     assert kalman_loglik(model, y) == -np.inf
+
+
+# --------------------------------------------------------------------------- smoother statistics
+def _brute_force_posterior(model: StateSpace, y):
+    """E and Cov of all stacked states given the observed y, by direct Gaussian conditioning."""
+    N, n = y.shape
+    k = model.T.shape[0]
+    # Prior mean and covariance of the stacked states x_1..x_N.
+    m = np.zeros(N * k)
+    V = np.zeros((N * k, N * k))
+    m[:k], V[:k, :k] = model.a1, model.P1
+    for t in range(1, N):
+        s, p = slice(t * k, (t + 1) * k), slice((t - 1) * k, t * k)
+        m[s] = model.c + model.T @ m[p]
+        V[s, : t * k] = model.T @ V[p, : t * k]       # Cov(x_t, x_<t)
+        V[: t * k, s] = V[s, : t * k].T
+        V[s, s] = model.T @ V[p, p] @ model.T.T + model.Q
+    Zbig = np.kron(np.eye(N), model.Z)
+    obs = np.isfinite(y).ravel()
+    Zo = Zbig[obs]
+    my = np.tile(model.d, N)[obs] + Zo @ m
+    Vyy = Zo @ V @ Zo.T + np.kron(np.eye(N), model.H)[np.ix_(obs, obs)]
+    Vxy = V @ Zo.T
+    G = np.linalg.solve(Vyy, Vxy.T).T
+    mean = m + G @ (y.ravel()[obs] - my)
+    cov = V - G @ Vxy.T
+    return mean.reshape(N, k), cov
+
+
+def test_smoothed_stats_match_brute_force_conditioning():
+    from yck.model.kalman import smoothed_stats
+
+    rng = np.random.default_rng(7)
+    k, n, N = 2, 3, 6
+    T = np.array([[0.8, 0.1], [-0.2, 0.6]])
+    Q = np.array([[0.5, 0.1], [0.1, 0.3]])
+    c = np.array([0.3, -0.1])
+    a1, P1 = stationary_init(T, Q, c)
+    model = StateSpace(Z=rng.normal(size=(n, k)), H=np.diag([0.2, 0.4, 0.3]), T=T, Q=Q,
+                       a1=a1, P1=P1, c=c, d=np.array([0.1, 0.0, -0.2]))
+    y = rng.normal(size=(N, n))
+    y[1, 0] = y[3] = np.nan
+    y[4, 1:] = np.nan
+    st = smoothed_stats(model, y)
+    mean, cov = _brute_force_posterior(model, y)
+    E = lambda t: mean[t]
+    Exx = lambda t, s: np.outer(mean[t], mean[s]) + cov[t * k:(t + 1) * k, s * k:(s + 1) * k]
+
+    assert st.loglik == pytest.approx(kalman_filter(model, y).loglik, rel=1e-12)
+    np.testing.assert_allclose(st.a_s, mean, atol=1e-10)
+    np.testing.assert_allclose(st.S11, sum(Exx(t, t) for t in range(1, N)), atol=1e-10)
+    np.testing.assert_allclose(st.S10[:, 0], sum(E(t) for t in range(1, N)), atol=1e-10)
+    np.testing.assert_allclose(st.S10[:, 1:], sum(Exx(t, t - 1) for t in range(1, N)), atol=1e-10)  # lag-one terms
+    np.testing.assert_allclose(st.S00[1:, 1:], sum(Exx(t, t) for t in range(N - 1)), atol=1e-10)
+    for j in range(n):
+        ts = [t for t in range(N) if np.isfinite(y[t, j])]
+        assert st.n_i[j] == len(ts)
+        assert st.syy[j] == pytest.approx(sum((y[t, j] - model.d[j]) ** 2 for t in ts))
+        np.testing.assert_allclose(st.sya[j], sum((y[t, j] - model.d[j]) * E(t) for t in ts), atol=1e-10)
+        np.testing.assert_allclose(st.sxx[j], sum(Exx(t, t) for t in ts), atol=1e-10)

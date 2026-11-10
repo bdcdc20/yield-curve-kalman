@@ -94,3 +94,57 @@ def test_estimates_lambda():
     # that it moves from 0.0609 to near the truth, and fits better than the truth.
     assert fit.params.lam == pytest.approx(0.04, rel=0.10)
     assert fit.loglik >= kalman_filter(true.statespace(GRID), y.to_numpy()).loglik
+
+
+# --------------------------------------------------------------------------- EM and exact score
+@pytest.mark.parametrize("est_lam", [False, True], ids=["lam-fixed", "lam-estimated"])
+@pytest.mark.parametrize("gaps", [False, True], ids=["complete", "missing"])
+def test_score_matches_numerical_gradient_of_loglik(est_lam, gaps):
+    from yck.model.kalman import kalman_loglik, smoothed_stats
+    from yck.model.statespace_dns import score
+
+    y, _ = _simulate(TRUE, N=150, seed=11)
+    if gaps:
+        y.iloc[::4, :3] = np.nan
+        y.iloc[30] = np.nan
+    Y = y.to_numpy()
+    tau = np.array(GRID, float)
+    # A deliberately non-optimal point, so the gradient is far from zero.
+    p = DNSParams(TRUE.mu + [0.3, -0.2, 0.1], TRUE.A * 0.98, TRUE.Q * 1.3, TRUE.h * 0.7, lam=0.07)
+    theta = p.to_vector(est_lam)
+    st = smoothed_stats(p.statespace(tau), Y)
+    g = score(theta, st, tau, est_lam, p.lam)
+
+    def ll(th):
+        return kalman_loglik(DNSParams.from_vector(th, len(GRID), est_lam, p.lam).statespace(tau), Y)
+
+    num = np.array([(ll(theta + e) - ll(theta - e)) / 2e-6 for e in np.eye(theta.size) * 1e-6])
+    np.testing.assert_allclose(g, num, rtol=1e-4, atol=1e-3)
+
+
+def test_em_increases_likelihood():
+    from yck.model.kalman import smoothed_stats
+    from yck.model.statespace_dns import em_update
+
+    y, _ = _simulate(TRUE, N=200, seed=2)
+    y.iloc[::5, :2] = np.nan
+    tau, Y = np.array(GRID, float), y.to_numpy()
+    p = two_step_start(y)
+    lls = []
+    for _ in range(25):
+        st = smoothed_stats(p.statespace(tau), Y)
+        lls.append(st.loglik)
+        p = em_update(p, st, tau)
+    assert lls[-1] > lls[0] + 1.0
+    # Monotone up to the first-state term, which the M-step leaves out.
+    assert np.all(np.diff(lls) > -1e-3)
+
+
+def test_noise_floor_is_respected_and_multistart_never_worse():
+    y, _ = _simulate(DNSParams(TRUE.mu, TRUE.A, TRUE.Q, np.full(len(GRID), 0.004**2), TRUE.lam), N=200, seed=4)
+    one = fit_dns_mle(y, h_floor_bp=1.0)
+    assert np.all(np.sqrt(one.params.h) * 100 >= 1.0 - 1e-9)  # true noise is 0.4 bp, so the floor binds
+    free = fit_dns_mle(y, h_floor_bp=None)
+    assert np.sqrt(free.params.h).min() * 100 < 1.0
+    multi = fit_dns_mle(y, h_floor_bp=1.0, n_starts=3)
+    assert multi.loglik >= one.loglik - 1e-6

@@ -23,6 +23,20 @@ transforms below guarantee a valid model for any theta:
 A is left free; if a trial A has an eigenvalue >= 1 the stationary prior
 does not exist and a diffuse prior is used for that evaluation instead
 (README section 6.3).
+
+Estimation is done in two phases, both driven by one compiled filter +
+smoother pass that returns sufficient statistics (`kalman.smoothed_stats`):
+
+1. EM (Shumway & Stoffer 1982). Closed-form updates of A, mu, Q and H from
+   the smoothed moments. EM is robust from a poor start and never needs a
+   step size, but it slows down near the optimum.
+2. L-BFGS-B with the exact score. By Fisher's identity, the gradient of the
+   log-likelihood equals the gradient of the expected complete-data
+   log-likelihood, with expectations held at the current parameters. Given
+   the statistics, that function is a cheap closed form, so the gradient
+   costs one smoother pass instead of one filter pass per parameter (the
+   numerical-gradient approach, which also stalled on the flat ridges of
+   this likelihood).
 """
 from __future__ import annotations
 
@@ -34,8 +48,8 @@ import pandas as pd
 from scipy.optimize import minimize
 
 from yck.model.dns import DL_LAMBDA, FACTORS, fit_dynamics, fit_factors, fitted_yields, maturities_from_columns, ns_loadings
-from yck.model.kalman import (FilterResult, StateSpace, forecast_state, kalman_filter, kalman_loglik,
-                              rts_smoother, stationary_init)
+from yck.model.kalman import (FilterResult, SmootherStats, StateSpace, forecast_state, kalman_filter,
+                              rts_smoother, smoothed_stats, stationary_init)
 
 DIFFUSE_VAR = 100.0  # prior variance (pp^2) when A is not stable: wide relative to yield levels
 _TRIL = np.tril_indices(3)
@@ -136,46 +150,197 @@ class DNSFit:
         return ss.Z @ forecast_state(ss, a_filt_t, h)
 
 
+def _logdet_and_inv(M):
+    L = np.linalg.cholesky(M)
+    Linv = np.linalg.inv(L)
+    return 2.0 * np.log(np.diag(L)).sum(), Linv.T @ Linv
+
+
+def expected_complete_loglik(theta, st: SmootherStats, tau, estimate_lambda: bool = False,
+                             lam: float = DL_LAMBDA) -> float:
+    """E[log p(states, observed yields; theta)], expectations from the smoother run in `st`.
+
+    Constants are dropped. Three terms, each a closed form in the statistics:
+
+    - measurement, per maturity j: -1/2 [n_j log h_j + S_j / h_j], where
+      S_j = sum (y - Z_j x)^2 in expectation = syy - 2 Z_j sya + Z_j sxx Z_j';
+    - transition: -1/2 [(N-1) log|Q| + tr(Q^{-1} W)], where
+      W = S11 - B S10' - S10 B' + B S00 B' and B = [c, A];
+    - first state: -1/2 [log|P1| + tr(P1^{-1} E[(x_1 - a1)(x_1 - a1)'])].
+    """
+    n = st.n_i.size
+    p = DNSParams.from_vector(theta, n, estimate_lambda, lam)
+    ss = p.statespace(tau)
+    Z = ss.Z
+    S = st.syy - 2.0 * np.einsum("jk,jk->j", Z, st.sya) + np.einsum("jk,jkl,jl->j", Z, st.sxx, Z)
+    ll = -0.5 * np.sum(st.n_i * np.log(p.h) + S / p.h)
+
+    B = np.column_stack([ss.c, ss.T])
+    W = st.S11 - B @ st.S10.T - st.S10 @ B.T + B @ st.S00 @ B.T
+    logdet_Q, Qinv = _logdet_and_inv(p.Q)
+    ll += -0.5 * (st.n_trans * logdet_Q + np.sum(Qinv * W))
+
+    x1 = st.a_s[0]
+    M = np.outer(x1 - ss.a1, x1 - ss.a1) + st.P_s[0]
+    logdet_P1, P1inv = _logdet_and_inv(ss.P1)
+    ll += -0.5 * (logdet_P1 + np.sum(P1inv * M))
+    return float(ll)
+
+
+def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: float = DL_LAMBDA,
+          eps: float = 1e-5) -> np.ndarray:
+    """Exact gradient of the log-likelihood at theta (Fisher's identity).
+
+    Differentiates the closed-form expected complete-data log-likelihood with
+    the smoother statistics held fixed. Central differences are accurate here
+    (errors ~1e-9) because that function is smooth and costs microseconds;
+    no filter is re-run.
+    """
+    theta = np.asarray(theta, float)
+    g = np.empty_like(theta)
+    for i in range(theta.size):
+        e = np.zeros_like(theta)
+        e[i] = eps
+        g[i] = (expected_complete_loglik(theta + e, st, tau, estimate_lambda, lam)
+                - expected_complete_loglik(theta - e, st, tau, estimate_lambda, lam)) / (2 * eps)
+    return g
+
+
+def em_update(p: DNSParams, st: SmootherStats, tau, h_min: float = 1e-10) -> DNSParams:
+    """One EM M-step: closed-form A, mu, Q, H given the smoother statistics (lambda unchanged).
+
+    The transition is a regression of x_t on (1, x_{t-1}) in expectation:
+    B = S10 S00^{-1}, Q = (S11 - B S10') / (N-1). Each maturity's variance is
+    its expected squared residual, averaged over the months it is observed.
+    The first-state term is left out of the M-step (standard practice); the
+    gradient phase that follows maximises the exact likelihood.
+    """
+    B = np.linalg.solve(st.S00.T, st.S10.T).T
+    c, A = B[:, 0], B[:, 1:]
+    Q = (st.S11 - B @ st.S10.T) / st.n_trans
+    Q = (Q + Q.T) / 2
+    Z = ns_loadings(tau, p.lam)
+    S = st.syy - 2.0 * np.einsum("jk,jk->j", Z, st.sya) + np.einsum("jk,jkl,jl->j", Z, st.sxx, Z)
+    h = np.maximum(S / np.maximum(st.n_i, 1.0), h_min)
+    try:
+        mu = np.linalg.solve(np.eye(3) - A, c)
+    except np.linalg.LinAlgError:
+        mu = p.mu
+    return DNSParams(mu=mu, A=A, Q=Q, h=h, lam=p.lam)
+
+
 def fit_dns_mle(
     yields: pd.DataFrame,
     start: DNSParams | None = None,
     estimate_lambda: bool = False,
     lam: float = DL_LAMBDA,
-    maxiter: int = 2000,
-    polish: bool = True,
+    h_floor_bp: float | None = 1.0,
+    n_starts: int = 1,
+    seed: int = 0,
+    **kwargs,
 ) -> DNSFit:
     """Maximum-likelihood estimation of the DNS state-space model.
 
-    Minimises minus the average log-likelihood per observed yield (average
-    rather than sum, so the scale of the objective, and hence the optimiser's
-    tolerances, does not depend on the sample length). Uses L-BFGS-B and then,
-    if `polish`, BFGS from that point, which tightens convergence on the
-    flat, highly persistent directions typical of yield models.
-    `start` defaults to the two-step estimates; pass the previous estimate
-    when re-estimating on a slightly longer sample, which is much faster.
+    Each start runs EM and then L-BFGS-B with the exact score (`_fit_from`).
+    With `n_starts > 1`, the extra starts are random perturbations of the
+    first (fixed `seed`, so results are reproducible), and the
+    highest-likelihood fit is kept.
+
+    **Measurement-noise floor.** By default each maturity's noise sd is
+    bounded below by `h_floor_bp` = 1 bp. Without it, the USD likelihood
+    pushes a few maturities to ~0.01 bp: GSW yields are points on a smooth
+    fitted Svensson curve, so three factors can match some of them almost
+    exactly. That makes the likelihood so badly conditioned that quasi-Newton
+    methods stop with a large gradient, and leaves scattered local maxima.
+    No real yield is measured to better than about 1 bp. With the floor,
+    every start converges (gradient < 0.02) and starts land on one or two
+    reproducible optima. Pass `h_floor_bp=None` for the unrestricted model.
+    """
+    p0 = start or two_step_start(yields, lam)
+    rng = np.random.default_rng(seed)
+    best = None
+    for k in range(n_starts):
+        p = p0 if k == 0 else _perturb(p0, rng)
+        fit = _fit_from(yields, p, estimate_lambda, lam, h_floor_bp, **kwargs)
+        if best is None or fit.loglik > best.loglik:
+            best = fit
+    return best
+
+
+def _perturb(p: DNSParams, rng) -> DNSParams:
+    """A random start near p: shifted means, jittered (still stable) A, rescaled Q, H and lambda."""
+    A = p.A + rng.normal(scale=0.03, size=(3, 3))
+    if np.max(np.abs(np.linalg.eigvals(A))) >= 0.999:
+        A = p.A
+    return DNSParams(mu=p.mu + rng.normal(scale=1.0, size=3), A=A, Q=p.Q * np.exp(rng.normal(scale=0.5)),
+                     h=p.h * np.exp(rng.normal(scale=1.0, size=p.h.size)), lam=p.lam * np.exp(rng.normal(scale=0.2)))
+
+
+def _fit_from(
+    yields: pd.DataFrame,
+    p: DNSParams,
+    estimate_lambda: bool,
+    lam: float,
+    h_floor_bp: float | None,
+    em_iters: int = 300,
+    em_tol: float = 1e-2,
+    maxiter: int = 5000,
+    max_restarts: int = 10,
+) -> DNSFit:
+    """One start: EM, then L-BFGS-B with the exact score, restarted until it stops improving.
+
+    The objective is minus the average log-likelihood per observed yield, so
+    its scale and hence the optimiser's tolerances do not depend on sample
+    length. EM stops when an iteration gains less than `em_tol`
+    log-likelihood points.
     """
     t0 = time.perf_counter()
     cols = list(yields.columns)
+    n = len(cols)
     tau = maturities_from_columns(cols)
     Y = yields.to_numpy(float)
     n_obs = int(np.isfinite(Y).sum())
-    start = start or two_step_start(yields, lam)
-    if estimate_lambda is False:
-        start = DNSParams(start.mu, start.A, start.Q, start.h, lam)
-    theta0 = start.to_vector(estimate_lambda)
+    h_min = (h_floor_bp / 100.0) ** 2 if h_floor_bp else 1e-10
+    p = DNSParams(p.mu, p.A, p.Q, np.maximum(p.h, h_min), p.lam if estimate_lambda else lam)
 
-    def objective(theta):
-        p = DNSParams.from_vector(theta, len(cols), estimate_lambda, lam)
-        ll = kalman_loglik(p.statespace(tau), Y)
-        return -ll / n_obs if np.isfinite(ll) else 1e6
+    # Phase 1: EM.
+    prev = -np.inf
+    em_done = 0
+    for em_done in range(1, em_iters + 1):
+        st = smoothed_stats(p.statespace(tau), Y)
+        if not np.isfinite(st.loglik) or st.loglik - prev < em_tol:
+            break
+        prev = st.loglik
+        p_new = em_update(p, st, tau, h_min=h_min)
+        if not np.all(np.isfinite(p_new.A)) or np.min(np.linalg.eigvalsh(p_new.Q)) <= 0:
+            break
+        p = p_new
 
-    res = minimize(objective, theta0, method="L-BFGS-B", options={"maxiter": maxiter, "maxfun": 50 * maxiter})
-    if polish:
-        res2 = minimize(objective, res.x, method="BFGS", options={"maxiter": maxiter, "gtol": 1e-6})
-        if res2.fun <= res.fun:
-            res = res2
+    # Phase 2: quasi-Newton on the exact likelihood and score.
+    def fun(theta):
+        q = DNSParams.from_vector(theta, n, estimate_lambda, lam)
+        st = smoothed_stats(q.statespace(tau), Y)
+        if not np.isfinite(st.loglik):
+            return 1e6, np.zeros_like(theta)
+        return -st.loglik / n_obs, -score(theta, st, tau, estimate_lambda, lam) / n_obs
 
-    params = DNSParams.from_vector(res.x, len(cols), estimate_lambda, lam)
+    theta0 = p.to_vector(estimate_lambda)
+    bounds = [(None, None)] * 18 + [(np.log(h_min) if h_floor_bp else None, None)] * n
+    bounds += [(None, None)] * (theta0.size - len(bounds))
+    # L-BFGS-B can declare convergence when its steps shrink on an ill-conditioned
+    # surface; restarting resets its curvature memory. Stop when a restart gains
+    # less than 1e-3 log-likelihood points.
+    res = None
+    restarts = 0
+    for restarts in range(1, max_restarts + 1):
+        r = minimize(fun, theta0 if res is None else res.x, jac=True, method="L-BFGS-B", bounds=bounds,
+                     options={"maxiter": maxiter, "maxfun": 2 * maxiter, "ftol": 1e-13, "gtol": 1e-8})
+        gain = np.inf if res is None else (res.fun - r.fun) * n_obs
+        res = r if res is None or r.fun < res.fun else res
+        if gain < 1e-3:
+            break
+    params = DNSParams.from_vector(res.x, n, estimate_lambda, lam)
     return DNSFit(params=params, loglik=-res.fun * n_obs, n_params=theta0.size, nobs=n_obs,
-                  converged=bool(res.success), message=str(res.message),
+                  converged=bool(res.success),
+                  message=f"EM {em_done} it; L-BFGS-B x{restarts}: {res.message}",
                   seconds=time.perf_counter() - t0, columns=cols, estimate_lambda=estimate_lambda)

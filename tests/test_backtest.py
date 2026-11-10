@@ -62,11 +62,29 @@ def test_kalman_forecasts_no_look_ahead_and_reestimation_schedule():
     y.iloc[::5, 0] = np.nan  # missing points are fine for the filter
     origin = y.index[100]
     fits = []
-    base = dns_kalman_forecasts(y, horizons=(1, 6), first_origin=origin, reestimate_every=4, fits=fits)
+    base = dns_kalman_forecasts(y, horizons=(1, 6), first_origin=origin, reestimate_every=4, n_starts=1, fits=fits)
     assert [t for t, _ in fits] == list(y.index[100::4])  # re-estimated every 4 origins
     shocked = y.copy()
     shocked.iloc[101:] += 3.0  # rewrite everything after the first origin
-    after = dns_kalman_forecasts(shocked, horizons=(1, 6), first_origin=origin, reestimate_every=4)
+    after = dns_kalman_forecasts(shocked, horizons=(1, 6), first_origin=origin, reestimate_every=4, n_starts=1)
     for h in (1, 6):
         target = origin + pd.offsets.MonthEnd(h)
         pd.testing.assert_series_equal(base[h].loc[target], after[h].loc[target])
+
+
+def test_kalman_forecasts_parallel_and_cache_reproduce_serial(tmp_path):
+    y = _panel(T=110)
+    kw = dict(horizons=(1, 6), first_origin=y.index[96], reestimate_every=6, n_starts=1)
+    serial = dns_kalman_forecasts(y, **kw)
+    parallel = dns_kalman_forecasts(y, jobs=2, cache_dir=tmp_path, **kw)
+    assert len(list(tmp_path.glob("*.json"))) == 3  # one cached fit per re-estimation origin
+    cached_fits = []
+    cached = dns_kalman_forecasts(y, cache_dir=tmp_path, fits=cached_fits, **kw)
+    for h in (1, 6):
+        pd.testing.assert_frame_equal(serial[h], parallel[h])
+        pd.testing.assert_frame_equal(serial[h], cached[h])
+    # Changing the data changes the cache key, so nothing stale is reused.
+    y2 = y.copy()
+    y2.iloc[0, 0] += 0.01
+    dns_kalman_forecasts(y2, cache_dir=tmp_path, **kw)
+    assert len(list(tmp_path.glob("*.json"))) == 6

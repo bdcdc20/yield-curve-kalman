@@ -128,19 +128,59 @@ def kalman_filter(model: StateSpace, y) -> FilterResult:
                         a_filt=a_filt, P_filt=P_filt, n_obs=n_obs)
 
 
-def _loglik_loop(y, Z, H, d, T, Q, c, a1, P1):
-    """Log-likelihood only: the same recursion as `kalman_filter`, written for numba.
+try:
+    from numba import njit
 
-    Maximum likelihood evaluates the filter thousands of times, and in pure Python
-    the per-period overhead (not the 17x17 algebra) dominates. Compiled, this is
-    the same arithmetic without that overhead. It returns -inf when F_t is not
-    positive definite, so the optimiser simply rejects that parameter guess.
+    _jit = njit(cache=True)
+    HAVE_NUMBA = True
+except ImportError:  # numba is optional: the loops below then run as plain (slow) Python
+    def _jit(f):
+        return f
+
+    HAVE_NUMBA = False
+
+
+@_jit
+def _chol_logdet(F):
+    """log|F| by Cholesky, or nan if F is not positive definite.
+
+    Written by hand because numba's own Cholesky raises on non-PD input, and
+    that cannot be caught cheaply inside compiled code.
+    """
+    m = F.shape[0]
+    L = np.zeros((m, m))
+    for i in range(m):
+        for j in range(i + 1):
+            s = F[i, j]
+            for q in range(j):
+                s -= L[i, q] * L[j, q]
+            if i == j:
+                if not s > 0.0:
+                    return np.nan
+                L[i, i] = np.sqrt(s)
+            else:
+                L[i, j] = s / L[j, j]
+    return 2.0 * np.log(np.diag(L)).sum()
+
+
+@_jit
+def _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
+    """The filter recursion, as in `kalman_filter`, for compiled callers.
+
+    Fills a_pred/P_pred/a_filt/P_filt in place (pass arrays with a zero
+    leading dimension to skip storing) and returns the log-likelihood, or -inf
+    when F_t is not positive definite, so an optimiser simply rejects that
+    parameter guess.
     """
     N, n = y.shape
+    store = a_pred.shape[0] > 0
     a = a1.copy()
     P = P1.copy()
     ll = 0.0
     for t in range(N):
+        if store:
+            a_pred[t] = a
+            P_pred[t] = P
         idx = np.empty(n, np.int64)
         m = 0
         for j in range(n):
@@ -154,42 +194,79 @@ def _loglik_loop(y, Z, H, d, T, Q, c, a1, P1):
             v = y[t][idx] - d[idx] - Zt @ a
             PZ = P @ Zt.T
             F = Zt @ PZ + Ht
-            ok = True
-            for i in range(m):
-                if not F[i, i] > 0.0:
-                    ok = False
-            if not ok:
+            logdet = _chol_logdet(F)
+            if np.isnan(logdet):
                 return -np.inf
-            # Cholesky by hand: numba raises (and cannot be caught cheaply) on non-PD input.
-            L = np.zeros((m, m))
-            for i in range(m):
-                for j in range(i + 1):
-                    s = F[i, j]
-                    for q in range(j):
-                        s -= L[i, q] * L[j, q]
-                    if i == j:
-                        if s <= 0.0:
-                            return -np.inf
-                        L[i, i] = np.sqrt(s)
-                    else:
-                        L[i, j] = s / L[j, j]
             Finv_v = np.linalg.solve(F, v)
             K = np.linalg.solve(F, np.ascontiguousarray(PZ.T)).T
             a = a + K @ v
             P = P - K @ PZ.T
             P = 0.5 * (P + P.T)
-            ll += -0.5 * (m * LOG_2PI + 2.0 * np.log(np.diag(L)).sum() + v @ Finv_v)
+            ll += -0.5 * (m * LOG_2PI + logdet + v @ Finv_v)
+        if store:
+            a_filt[t] = a
+            P_filt[t] = P
         a = c + T @ a
         P = T @ P @ T.T + Q
     return ll
 
 
-try:
-    from numba import njit
+@_jit
+def _loglik_loop(y, Z, H, d, T, Q, c, a1, P1):
+    k = T.shape[0]
+    e1, e2 = np.empty((0, k)), np.empty((0, k, k))
+    return _forward(y, Z, H, d, T, Q, c, a1, P1, e1, e2, e1, e2)
 
-    _loglik_fast = njit(cache=True)(_loglik_loop)
-except ImportError:  # numba is optional: fall back to the readable filter
-    _loglik_fast = None
+
+@_jit
+def _stats_loop(y, Z, H, d, T, Q, c, a1, P1):
+    """Filter, RTS smoother, and the sufficient statistics of the expected complete-data log-likelihood."""
+    N, n = y.shape
+    k = T.shape[0]
+    a_pred = np.empty((N, k))
+    P_pred = np.empty((N, k, k))
+    a_s = np.empty((N, k))
+    P_s = np.empty((N, k, k))
+    ll = _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_s, P_s)
+
+    n_i = np.zeros(n)
+    syy = np.zeros(n)
+    sya = np.zeros((n, k))
+    sxx = np.zeros((n, k, k))
+    S11 = np.zeros((k, k))
+    S10 = np.zeros((k, k + 1))
+    S00 = np.zeros((k + 1, k + 1))
+    if not np.isfinite(ll):
+        return ll, n_i, syy, sya, sxx, S11, S10, S00, a_s, P_s
+
+    # Backward pass (a_s, P_s hold the filtered values on entry). C[t] = Cov(x_{t+1}, x_t | all data).
+    C = np.zeros((N, k, k))
+    for t in range(N - 2, -1, -1):
+        J = np.linalg.solve(P_pred[t + 1], T @ P_s[t]).T  # P_{t|t} T' P_{t+1|t}^{-1}
+        a_s[t] = a_s[t] + J @ (a_s[t + 1] - a_pred[t + 1])
+        P_s[t] = P_s[t] + J @ (P_s[t + 1] - P_pred[t + 1]) @ J.T
+        P_s[t] = 0.5 * (P_s[t] + P_s[t].T)
+        C[t] = P_s[t + 1] @ J.T
+
+    for t in range(N):
+        Exx = np.outer(a_s[t], a_s[t]) + P_s[t]
+        for j in range(n):
+            if np.isfinite(y[t, j]):
+                yj = y[t, j] - d[j]
+                n_i[j] += 1.0
+                syy[j] += yj * yj
+                sya[j] += yj * a_s[t]
+                sxx[j] += Exx
+        if t >= 1:  # transition pairs (x_t, x_{t-1}); regressor z = (1, x_{t-1})
+            S11 += Exx
+            S10[:, 0] += a_s[t]
+            S10[:, 1:] += np.outer(a_s[t], a_s[t - 1]) + C[t - 1]
+        if t <= N - 2:
+            S00[0, 0] += 1.0
+            S00[0, 1:] += a_s[t]
+            S00[1:, 0] += a_s[t]
+            S00[1:, 1:] += Exx
+    return ll, n_i, syy, sya, sxx, S11, S10, S00, a_s, P_s
 
 
 def kalman_loglik(model: StateSpace, y) -> float:
@@ -198,14 +275,64 @@ def kalman_loglik(model: StateSpace, y) -> float:
     Returns -inf (instead of raising) when the parameters make F_t singular.
     """
     y = np.atleast_2d(np.asarray(y, dtype=float))
-    if _loglik_fast is None:
+    if not HAVE_NUMBA:
         try:
             return kalman_filter(model, y).loglik
         except np.linalg.LinAlgError:
             return -np.inf
     f = lambda x: np.ascontiguousarray(x, dtype=float)
-    return float(_loglik_fast(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q),
+    return float(_loglik_loop(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q),
                               f(model.c), f(model.a1), f(model.P1)))
+
+
+@dataclass
+class SmootherStats:
+    """Everything the expected complete-data log-likelihood needs, from one filter + smoother pass.
+
+    With E[.] = expectation given all data (the smoother), x_t the state and
+    z_t = (1, x_t')':
+
+    - per observed series j (sums over months where y_tj is observed):
+      n_i[j] = count, syy[j] = sum (y_tj - d_j)^2,
+      sya[j] = sum (y_tj - d_j) E[x_t], sxx[j] = sum E[x_t x_t'];
+    - transition, over t = 2..N: S11 = sum E[x_t x_t'],
+      S10 = sum E[x_t z_{t-1}'], S00 = sum E[z_{t-1} z_{t-1}'];
+    - first state: a_s[0], P_s[0].
+
+    These sums are what make both EM (closed-form updates) and the exact
+    score (Fisher's identity) cheap: after one pass, neither needs the data
+    again.
+    """
+
+    loglik: float
+    n_i: np.ndarray
+    syy: np.ndarray
+    sya: np.ndarray
+    sxx: np.ndarray
+    S11: np.ndarray
+    S10: np.ndarray
+    S00: np.ndarray
+    a_s: np.ndarray  # (N, k) smoothed states
+    P_s: np.ndarray  # (N, k, k)
+
+    @property
+    def n_trans(self) -> int:
+        return int(round(self.S00[0, 0]))
+
+
+def smoothed_stats(model: StateSpace, y) -> SmootherStats:
+    """One compiled filter + RTS smoother pass returning the log-likelihood and sufficient statistics.
+
+    Assumes H is diagonal for the measurement statistics (as in DNS), so each
+    series' noise can be handled on its own. If the parameters are invalid
+    (F_t not positive definite) the log-likelihood is -inf and the
+    statistics are zeros.
+    """
+    y = np.atleast_2d(np.asarray(y, dtype=float))
+    f = lambda x: np.ascontiguousarray(x, dtype=float)
+    out = _stats_loop(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q),
+                      f(model.c), f(model.a1), f(model.P1))
+    return SmootherStats(float(out[0]), *out[1:])
 
 
 def rts_smoother(model: StateSpace, res: FilterResult):
