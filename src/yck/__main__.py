@@ -43,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--first-origin", help="first forecast origin (default: per currency)")
     b.add_argument("--no-cache", action="store_true", help="refit everything instead of reusing data/results/cache")
     b.add_argument("--macro", action="store_true", help="yields + macro model with real-time macro panels (README 6.4)")
+    b.add_argument("--macro-vars", nargs="*", default=["real_activity", "inflation", "policy_rate"],
+                   choices=["real_activity", "inflation", "policy_rate"], help="macro variables to include")
     b.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
     b.add_argument("--data-dir", type=Path, default=ROOT / "data")
     a = p.parse_args(argv)
@@ -89,9 +91,11 @@ def _backtest(a) -> int:
         est_start, first_origin = _BACKTEST_DEFAULTS[ccy]
         est_start, first_origin = a.est_start or est_start, a.first_origin or first_origin
         y = pd.read_parquet(a.data_dir / "processed" / f"curves_{ccy}.parquet")
-        macro = RealTimeMacro.load(ccy, a.data_dir, a.config) if a.macro else None
+        macro = RealTimeMacro.load(ccy, a.data_dir, a.config, a.macro_vars) if a.macro else None
+        all_vars = len(a.macro_vars) == 3
+        mtag = ("macro_" if all_vars else "macro-" + "+".join(a.macro_vars) + "_") if a.macro else ""
         for lam_mode in a.lam:
-            tag = ("macro_" if a.macro else "") + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
+            tag = mtag + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
             print(f"== {ccy} {tag}: estimation from {est_start or 'start'}, origins from {first_origin}, "
                   f"{a.starts} starts, {jobs} jobs", flush=True)
             fits, t0 = [], time.perf_counter()

@@ -76,3 +76,10 @@ def test_reindex_marks_unknown_months_missing():
     p = rt.at("2001-03-31", index=idx)
     assert p.index[-1] == pd.Timestamp("2001-03-31")
     assert np.isnan(p.loc["2001-03-31", "real_activity"]) and p.loc["2001-03-31", "policy_rate"] == 14.0
+
+
+def test_variable_subset():
+    rt = RealTimeMacro(_latest(), SPECS, LAGS, _vintages(), variables=("policy_rate",))
+    assert list(rt.at("2001-03-31").columns) == ["policy_rate"]
+    with pytest.raises(ValueError):
+        RealTimeMacro(_latest(), SPECS, LAGS, _vintages(), variables=("gdp",))

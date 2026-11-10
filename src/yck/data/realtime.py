@@ -35,26 +35,30 @@ class RealTimeMacro:
     """Macro panel for one currency as known at any origin: `rt.at(origin)`."""
 
     def __init__(self, latest: pd.DataFrame, specs: dict, release_lag: dict,
-                 vintages: pd.DataFrame | None = None):
-        self.latest = latest[list(VARIABLES)]
+                 vintages: pd.DataFrame | None = None, variables=VARIABLES):
+        self.variables = tuple(variables)
+        unknown = set(self.variables) - set(VARIABLES)
+        if unknown:
+            raise ValueError(f"unknown macro variables {sorted(unknown)}; choose from {VARIABLES}")
+        self.latest = latest[list(self.variables)]
         self.specs = specs
         self.release_lag = release_lag
         self.vintages = {}
         if vintages is not None and not vintages.empty:
             for var, spec in specs.items():
-                if spec.get("vintages"):
+                if spec.get("vintages") and var in self.variables:
                     v = vintages[vintages["series_id"] == spec["id"]]
                     if not v.empty:
                         self.vintages[var] = v
 
     @classmethod
-    def load(cls, ccy: str, data_dir: Path, config_path: Path) -> "RealTimeMacro":
+    def load(cls, ccy: str, data_dir: Path, config_path: Path, variables=VARIABLES) -> "RealTimeMacro":
         cfg = yaml.safe_load(Path(config_path).read_text())
         processed = Path(data_dir) / "processed"
         latest = pd.read_parquet(processed / f"macro_{ccy}.parquet")
         vp = processed / f"vintages_{ccy}.parquet"
         vint = pd.read_parquet(vp) if vp.exists() else None
-        return cls(latest, cfg["macro"][ccy], cfg["release_lag_months"], vint)
+        return cls(latest, cfg["macro"][ccy], cfg["release_lag_months"], vint, variables)
 
     def _lagged_latest(self, var: str, origin: pd.Timestamp) -> pd.Series:
         last_known = origin - pd.offsets.MonthEnd(self.release_lag.get(var, 0))
@@ -74,7 +78,7 @@ class RealTimeMacro:
         """Macro panel as known at month-end `origin`, reindexed to `index` (NaN = not yet known)."""
         origin = pd.Timestamp(origin)
         cols = {}
-        for var in VARIABLES:
+        for var in self.variables:
             cols[var] = self._from_vintage(var, origin) if var in self.vintages else self._lagged_latest(var, origin)
         out = pd.DataFrame(cols)
         out = out.loc[:origin]
