@@ -8,3 +8,4 @@ __pycache__/
 # Downloaded and generated data stay local; the pipeline rebuilds them.
 data/raw/
 data/processed/
+data/results/

@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from yck.model.dns import DL_LAMBDA, fit_dynamics, fit_factors, maturities_from_columns, ns_loadings
+from yck.model.statespace_dns import DNSFit, fit_dns_mle
 
 
 def _target(origin: pd.Timestamp, h: int) -> pd.Timestamp:
@@ -60,6 +61,56 @@ def dns_two_step_forecasts(
         for h in horizons:
             out[h].append((_target(t, h), dyn.forecast(f_t, h) @ X.T))
 
+    return {
+        h: pd.DataFrame(np.array([v for _, v in rows]), index=pd.DatetimeIndex([d for d, _ in rows], name="date"),
+                        columns=y.columns)
+        for h, rows in out.items()
+    }
+
+
+def dns_kalman_forecasts(
+    yields: pd.DataFrame,
+    horizons=(1, 6, 12),
+    first_origin: str = "2000-01-31",
+    est_start: str | None = None,
+    reestimate_every: int = 12,
+    estimate_lambda: bool = False,
+    lam: float = DL_LAMBDA,
+    fits: list | None = None,
+    verbose: bool = False,
+) -> dict[int, pd.DataFrame]:
+    """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
+
+    Parameters are re-estimated every `reestimate_every` origins (12 = yearly)
+    on data up to that origin, each time starting from the previous estimate.
+    Between re-estimations the parameters are held fixed and the forecast
+    starts from the *filtered* state a_{t|t}, which uses data up to t only.
+    So no forecast ever sees data dated after its origin, even though one
+    filter pass covers the whole sample.
+
+    If `fits` is a list, each (origin, DNSFit) is appended to it, so parameter
+    stability can be inspected afterwards.
+    """
+    y = yields.loc[est_start:] if est_start else yields
+    origins = y.loc[first_origin:].index
+    pos = {d: i for i, d in enumerate(y.index)}
+    out: dict[int, list] = {h: [] for h in horizons}
+    fit: DNSFit | None = None
+    a_filt = None
+    for i, t in enumerate(origins):
+        if i % reestimate_every == 0:
+            sample = y.loc[:t]
+            start = fit.params if fit else None
+            fit = fit_dns_mle(sample, start=start, estimate_lambda=estimate_lambda,
+                              lam=fit.params.lam if fit else lam)
+            a_filt = fit.filter(y).a_filt  # row s uses y up to s only
+            if fits is not None:
+                fits.append((t, fit))
+            if verbose:
+                print(f"{t:%Y-%m}: loglik {fit.loglik:.1f}, lambda {fit.params.lam:.4f}, {fit.seconds:.0f}s", flush=True)
+        a_t = a_filt[pos[t]]
+        for h in horizons:
+            out[h].append((_target(t, h), fit.forecast(a_t, h)))
     return {
         h: pd.DataFrame(np.array([v for _, v in rows]), index=pd.DatetimeIndex([d for d, _ in rows], name="date"),
                         columns=y.columns)

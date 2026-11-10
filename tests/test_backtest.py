@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yck.eval.backtest import dns_two_step_forecasts, random_walk_forecasts, rmse_table
+from yck.eval.backtest import dns_kalman_forecasts, dns_two_step_forecasts, random_walk_forecasts, rmse_table
 from yck.model.dns import ns_loadings
 
 GRID = [3, 12, 24, 60, 120]
@@ -55,3 +55,18 @@ def test_rmse_table_uses_common_sample_and_bp():
     assert t.loc["3m", "a"] == pytest.approx(10.0)  # 0.1 pp = 10 bp; the 5.0 miss is excluded
     assert t.loc["3m", "b"] == pytest.approx(0.0)
     assert t.loc["3m", "n_obs"] == 3
+
+
+def test_kalman_forecasts_no_look_ahead_and_reestimation_schedule():
+    y = _panel(T=140)
+    y.iloc[::5, 0] = np.nan  # missing points are fine for the filter
+    origin = y.index[100]
+    fits = []
+    base = dns_kalman_forecasts(y, horizons=(1, 6), first_origin=origin, reestimate_every=4, fits=fits)
+    assert [t for t, _ in fits] == list(y.index[100::4])  # re-estimated every 4 origins
+    shocked = y.copy()
+    shocked.iloc[101:] += 3.0  # rewrite everything after the first origin
+    after = dns_kalman_forecasts(shocked, horizons=(1, 6), first_origin=origin, reestimate_every=4)
+    for h in (1, 6):
+        target = origin + pd.offsets.MonthEnd(h)
+        pd.testing.assert_series_equal(base[h].loc[target], after[h].loc[target])
