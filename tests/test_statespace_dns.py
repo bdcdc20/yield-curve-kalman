@@ -266,3 +266,54 @@ def test_lambda_derivative_of_loadings():
     tau = np.array([0.5, 3, 30, 120, 400.0])
     num = (ns_loadings(tau, 0.06 + 1e-7) - ns_loadings(tau, 0.06 - 1e-7)) / 2e-7
     np.testing.assert_allclose(ns_loadings_dlam(tau, 0.06), num, rtol=1e-6, atol=1e-8)
+
+
+# --------------------------------------------------------------------------- shrinkage
+def test_cross_penalty_value_gradient_and_mask():
+    from yck.model.statespace_dns import cross_penalty
+
+    rng = np.random.default_rng(0)
+    A = rng.normal(size=(5, 5))
+    s = np.array([1.0, 2.0, 0.5, 3.0, 1.5])
+    val, g = cross_penalty(A, 0.1, s)
+    assert np.all(g[:3, :3] == 0) and np.all(g[3:, 3:] == 0)  # only cross terms penalised
+    num = np.zeros_like(A)
+    for i in range(5):
+        for j in range(5):
+            E = np.zeros_like(A); E[i, j] = 1e-6
+            num[i, j] = (cross_penalty(A + E, 0.1, s)[0] - cross_penalty(A - E, 0.1, s)[0]) / 2e-6
+    np.testing.assert_allclose(g, num, atol=1e-5)
+    assert val == pytest.approx(-0.5 * sum((A[i, j] / (0.1 * s[i] / s[j])) ** 2
+                                           for i in range(5) for j in range(5) if (i < 3) != (j < 3)))
+
+
+def test_shrinkage_prior_gradient_matches_finite_differences():
+    from yck.model.statespace_dns import shrinkage_prior
+
+    data, p, _ = _simulate_dra(N=60)
+    q = DNSParams(p.mu, p.A + 0.05, p.Q + 0.02, p.h, p.lam)  # nonzero cross terms in A and Q
+    s = np.array([0.3, 0.4, 0.5, 0.6, 0.2])
+    theta = q.to_vector()
+    val, dA, dl = shrinkage_prior(q, 0.1, s)
+    g = np.zeros_like(theta)
+    g[5:30] = dA.ravel()
+    g[30:45] = dl
+    f = lambda th: shrinkage_prior(DNSParams.from_vector(th, len(GRID), k=5), 0.1, s)[0]
+    num = np.array([(f(theta + e) - f(theta - e)) / 2e-6 for e in np.eye(theta.size) * 1e-6])
+    np.testing.assert_allclose(g, num, atol=1e-4)
+
+
+def test_tight_shrinkage_reproduces_yields_only_and_loose_reproduces_full(dra_fit):
+    data, _, _, full = dra_fit
+    yields_only = fit_dns_mle(data[COLS])
+    tight = fit_dns_mle(data, shrink_tau=1e-4)
+    loose = fit_dns_mle(data, shrink_tau=100.0)
+    A, Q = tight.params.A, tight.params.Q
+    assert np.abs(np.r_[A[:3, 3:].ravel(), A[3:, :3].ravel(), Q[:3, 3:].ravel()]).max() < 1e-3
+    # The likelihood factorises, so the curve block equals the yields-only estimates.
+    np.testing.assert_allclose(A[:3, :3], yields_only.params.A, atol=5e-3)
+    np.testing.assert_allclose(tight.params.mu[:3], yields_only.params.mu, atol=5e-2)
+    f_t = tight.filtered_states(data)[-1]
+    f_y = yields_only.filtered_states(data[COLS])[-1]
+    np.testing.assert_allclose(tight.forecast(f_t, 12), yields_only.forecast(f_y, 12), atol=0.02)
+    assert loose.loglik == pytest.approx(full.loglik, abs=0.5)

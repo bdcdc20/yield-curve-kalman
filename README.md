@@ -448,7 +448,26 @@ instead ask whether it beats **what the market already prices**.
   (3m 0.81 / 0.86, 12m 0.93 / 0.95 at h = 6 / 12), and for the first time
   it is below forwards (0.95–0.99), though not significantly. So macro
   information helps the short end when the model is small enough to
-  estimate it. Next: restricted / shrunk macro models (§8, step 6).
+  estimate it.
+- **Restricted and shrunk macro models (USD, Kalman, real-time macro, h = 6 / 12).**
+
+  | vs yields-only Kalman (Clark–West p) | 3m | 12m | 24m | 5y | 10y |
+  |---|---|---|---|---|---|
+  | Policy rate only, h = 6 | 0.95 (0.01) | 0.97 (0.01) | 0.99 (0.06) | 1.00 | 1.02 |
+  | Policy rate only, h = 12 | 0.96 (0.03) | 0.98 (0.10) | 0.99 | 0.99 | 0.98 (0.04) |
+  | All 3, shrunk τ = 0.01, h = 12 | 1.01 | 0.99 | 0.98 (0.10) | 0.96 (0.09) | 0.97 (0.10) |
+  | All 3, shrunk τ = 0.1, h = 12 | 1.15 | 1.15 | 1.15 | 1.12 | 1.15 |
+  | All 3, unrestricted, h = 12 | 1.09 | 1.10 | 1.11 | 1.09 | 1.10 |
+
+  The **policy rate** adds significant information at the short end.
+  Capacity utilisation and inflation do not help out of sample: shrinking
+  their links towards zero (a Minnesota-style prior on both the lagged
+  cross-terms of A and the factor–macro shock covariance, so that τ → 0 is
+  exactly yields-only) only gets back to yields-only accuracy, and any weight
+  on them makes forecasts worse. The full τ grid (0.01, 0.03, 0.1, 0.3) is
+  reported, and no τ beats the policy-rate model, so the choice of τ involves
+  no data snooping. **No model beats forwards significantly.** The best
+  (policy rate only) is level with them: RMSE ratio 0.98–1.04 at h = 6, 12.
 - **Surveys (USD, optional).** Philadelphia Fed Survey of Professional
   Forecasters: quarterly 3m T-bill and 10y Treasury forecasts (free).
 - Test every model against each benchmark with Diebold–Mariano (§7.2).
@@ -554,10 +573,11 @@ premium), and that is the bar a model must clear.
 6. 🔶 **Yields + macro (§6.4).** Done: real-time macro panels
    (`data/realtime.py`), the DRA state-space model (any number of macro
    states, analytic score), real-time backtest (`python -m yck backtest
-   --macro`). First result: the full 6-state model overfits (§7.4).
-   Remaining: restricted or shrunk versions (policy rate only, a
-   block-restricted A, shrinkage towards yields-only), impulse responses and
-   a notebook. Original plan: real-time macro panels first (§7.3: ALFRED
+   --macro`), policy-rate-only variant (`--macro-vars`), shrinkage prior on
+   all factor–macro links (`--shrink`). Results (§7.4): only the policy rate
+   helps (short end); the full model overfits; shrinkage does not rescue
+   capacity utilisation or inflation. Remaining: impulse responses and
+   `notebooks/03_macro_usd.ipynb`. Original plan: real-time macro panels first (§7.3: ALFRED
    vintages for USD, release lags for EUR/GBP, unreleased months as missing
    observations). Then the 6-state DRA model with macro observed without
    error, with EM and the exact score extended to it, impulse responses and

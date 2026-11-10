@@ -23,11 +23,11 @@ evaluation protocol, the roadmap and the decisions already made.
   benchmark (`curves_ext_{CCY}.parquet`, `eval.backtest.forward_forecasts`)
   and DM/CW tests (`eval/stats.py`). USD: nothing beats the random walk
   significantly at h = 6, 12; no yields-only model beats forwards.
-- Roadmap step 6 (yields + macro) is in progress: real-time panels, DRA model
-  and backtest are done. The full 6-state model overfits out of sample; a
-  two-step VAR with the policy rate only helps the short end (README §7.4).
-  Next: restricted / shrunk macro models, impulse responses, notebook 03. Agreed order after that: EUR/GBP (7),
-  then **trading evaluation last** (8), once the models are final.
+- Roadmap step 6 (yields + macro) is nearly done: real-time panels, DRA
+  model, policy-rate-only variant and shrinkage prior are built and
+  backtested (README §7.4). USD result: only the policy rate helps (short
+  end, vs yields-only); nothing beats forwards significantly. Remaining:
+  impulse responses and notebook 03, then EUR/GBP (step 7), trading last.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. Full USD backtests take ~20 s (yields-only) to
   ~2 min (macro) from scratch on 8 cores. Bump `FIT_CACHE_VERSION` in
@@ -42,7 +42,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 80 passed
+python3 -m pytest -q                  # expect 90 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```

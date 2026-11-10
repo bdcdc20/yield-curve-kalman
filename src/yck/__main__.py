@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--macro", action="store_true", help="yields + macro model with real-time macro panels (README 6.4)")
     b.add_argument("--macro-vars", nargs="*", default=["real_activity", "inflation", "policy_rate"],
                    choices=["real_activity", "inflation", "policy_rate"], help="macro variables to include")
+    b.add_argument("--shrink", type=float, nargs="*", default=[None],
+                   help="shrinkage tau(s) for the factor<->macro cross terms (yields + macro only)")
     b.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
     b.add_argument("--data-dir", type=Path, default=ROOT / "data")
     a = p.parse_args(argv)
@@ -94,15 +96,15 @@ def _backtest(a) -> int:
         macro = RealTimeMacro.load(ccy, a.data_dir, a.config, a.macro_vars) if a.macro else None
         all_vars = len(a.macro_vars) == 3
         mtag = ("macro_" if all_vars else "macro-" + "+".join(a.macro_vars) + "_") if a.macro else ""
-        for lam_mode in a.lam:
-            tag = mtag + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
+        for lam_mode, tau in [(l, t) for l in a.lam for t in a.shrink]:
+            tag = mtag + (f"shrink{tau:g}_" if tau is not None else "") + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
             print(f"== {ccy} {tag}: estimation from {est_start or 'start'}, origins from {first_origin}, "
                   f"{a.starts} starts, {jobs} jobs", flush=True)
             fits, t0 = [], time.perf_counter()
             fc = dns_kalman_forecasts(y, est_start=est_start, first_origin=first_origin, reestimate_every=a.every,
                                       estimate_lambda=lam_mode == "est", h_floor_bp=floor, n_starts=a.starts,
                                       jobs=jobs, cache_dir=None if a.no_cache else out_dir / "cache",
-                                      fits=fits, verbose=True, macro=macro)
+                                      fits=fits, verbose=True, macro=macro, shrink_tau=tau)
             for h, df in fc.items():
                 df.to_parquet(out_dir / f"fc_{ccy}_kalman_{tag}_h{h}.parquet")
             pd.DataFrame([{"origin": t, "loglik": f.loglik, "lam": f.params.lam, "converged": f.converged,

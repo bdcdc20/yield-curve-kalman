@@ -71,7 +71,7 @@ def dns_two_step_forecasts(
     }
 
 
-FIT_CACHE_VERSION = 3  # bump when the estimator changes, so cached fits are not reused
+FIT_CACHE_VERSION = 4  # bump when the estimator changes, so cached fits are not reused
 
 
 def _cache_key(sample: pd.DataFrame, settings: dict) -> str:
@@ -87,13 +87,14 @@ def _fit_to_json(fit: DNSFit) -> dict:
     return {"mu": p.mu.tolist(), "A": p.A.tolist(), "Q": p.Q.tolist(), "h": p.h.tolist(), "lam": p.lam,
             "loglik": fit.loglik, "n_params": fit.n_params, "nobs": fit.nobs, "converged": fit.converged,
             "message": fit.message, "seconds": fit.seconds, "columns": fit.columns,
-            "estimate_lambda": fit.estimate_lambda}
+            "estimate_lambda": fit.estimate_lambda, "penalty": fit.penalty}
 
 
 def _fit_from_json(d: dict) -> DNSFit:
     params = DNSParams(mu=np.array(d["mu"]), A=np.array(d["A"]), Q=np.array(d["Q"]), h=np.array(d["h"]), lam=d["lam"])
-    return DNSFit(params=params, **{k: d[k] for k in ("loglik", "n_params", "nobs", "converged", "message",
-                                                     "seconds", "columns", "estimate_lambda")})
+    return DNSFit(params=params, penalty=d.get("penalty", 0.0),
+                  **{k: d[k] for k in ("loglik", "n_params", "nobs", "converged", "message",
+                                       "seconds", "columns", "estimate_lambda")})
 
 
 def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> DNSFit:
@@ -123,6 +124,7 @@ def dns_kalman_forecasts(
     fits: list | None = None,
     verbose: bool = False,
     macro=None,
+    shrink_tau: float | None = None,
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
@@ -157,6 +159,8 @@ def dns_kalman_forecasts(
     origins = y.loc[first_origin:].index
     refit_at = list(origins[::reestimate_every])
     settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
+    if shrink_tau is not None:
+        settings["shrink_tau"] = shrink_tau  # only added when used, so existing cache keys stay valid
     cache = str(cache_dir) if cache_dir else None
 
     def panel(t):

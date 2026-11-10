@@ -161,6 +161,7 @@ class DNSFit:
     seconds: float
     columns: list  # yield columns, then macro columns
     estimate_lambda: bool
+    penalty: float = 0.0  # log prior of the shrinkage (<= 0); loglik excludes it
 
     @property
     def aic(self) -> float:
@@ -361,6 +362,7 @@ def fit_dns_mle(
     seed: int = 0,
     keep: int = 2,
     prune_iters: int = 100,
+    shrink_tau: float | None = None,
     **kwargs,
 ) -> DNSFit:
     """Maximum-likelihood estimation of the DNS state-space model (yields only, or yields + macro).
@@ -384,11 +386,23 @@ def fit_dns_mle(
     No real yield is measured to better than about 1 bp. With the floor,
     every start converges (gradient < 0.02) and starts land on one or two
     reproducible optima. Pass `h_floor_bp=None` for the unrestricted model.
+
+    **Shrinkage** (`shrink_tau`, yields + macro only). The full VAR between
+    factors and macro has k^2 coefficients, and unrestricted it overfits out of
+    sample. A Minnesota-style Gaussian prior pulls the *cross* coefficients
+    (macro -> factors and factors -> macro) towards zero, with prior sd
+    tau * s_i / s_j, where s are the shock sds of the two-step start (so the
+    prior does not depend on units). tau -> 0 separates the curve and macro
+    dynamics (yields-only forecasts); tau -> inf is the full DRA model. The fit
+    maximises log-likelihood + log-prior (MAP); `loglik` reports the
+    likelihood alone and `penalty` the log-prior.
     """
     ycols, mcols = split_columns(data.columns)
     data = data[ycols + mcols]
     n = len(ycols)
     p0 = start or two_step_start(data, lam)
+    if shrink_tau is not None and mcols:
+        kwargs["shrink"] = (float(shrink_tau), np.sqrt(np.diag(two_step_start(data, lam).Q)))
     if n_starts <= 1:
         return _fit_from(data, n, p0, estimate_lambda, lam, h_floor_bp, **kwargs)
 
@@ -402,12 +416,13 @@ def fit_dns_mle(
     scouted = [_fit_from(data, n, p, estimate_lambda, lam, h_floor_bp, maxiter=prune_iters, max_restarts=1,
                          **{k: v for k, v in kwargs.items() if k not in ("maxiter", "max_restarts")})
                for p in starts]
-    scouted.sort(key=lambda f: -f.loglik if np.isfinite(f.loglik) else np.inf)
+    objective = lambda f: f.loglik + f.penalty if np.isfinite(f.loglik) else -np.inf
+    scouted.sort(key=lambda f: -objective(f))
     best = None
     for f in scouted[:keep]:
         fit = _fit_from(data, n, f.params, estimate_lambda, lam, h_floor_bp, em_iters=0,
                         **{k: v for k, v in kwargs.items() if k != "em_iters"})
-        if best is None or fit.loglik > best.loglik:
+        if best is None or objective(fit) > objective(best):
             best = fit
     best.seconds = time.perf_counter() - t0
     best.message = f"{n_starts} starts, best {keep} finished; " + best.message
@@ -436,6 +451,7 @@ def _fit_from(
     maxiter: int = 5000,
     max_restarts: int = 10,
     grad_tol: float = 0.005,
+    shrink: tuple | None = None,
 ) -> DNSFit:
     """One start: EM, then L-BFGS-B with the exact score, restarted until it stops improving.
 
@@ -468,20 +484,26 @@ def _fit_from(
         p = p_new
 
     # Phase 2: quasi-Newton on the exact likelihood and score.
+    a_slice = slice(k, k + k * k)  # A's position in theta (row-major)
+    l_slice = slice(k + k * k, k + k * k + k * (k + 1) // 2)  # Cholesky factor of Q
+
     def fun(theta):
         q = DNSParams.from_vector(theta, n, estimate_lambda, lam, k)
         st = smoothed_stats(q.statespace(tau), Y)
         if not np.isfinite(st.loglik):
             return 1e6, np.zeros_like(theta)
-        return -st.loglik / n_obs, -score(theta, st, tau, estimate_lambda, lam) / n_obs
+        g = score(theta, st, tau, estimate_lambda, lam)
+        pen = 0.0
+        if shrink is not None:
+            pen, dA, dl = shrinkage_prior(q, *shrink)
+            g[a_slice] += dA.ravel()
+            g[l_slice] += dl
+        return -(st.loglik + pen) / n_obs, -g / n_obs
 
     theta0 = p.to_vector(estimate_lambda)
     n_dyn = k + k * k + k * (k + 1) // 2
     bounds = [(None, None)] * n_dyn + [(np.log(h_min) if h_floor_bp else None, None)] * n
     bounds += [(None, None)] * (theta0.size - len(bounds))
-    # L-BFGS-B can declare convergence when its steps shrink on an ill-conditioned
-    # surface; restarting resets its curvature memory. Stop when a restart gains
-    # less than 1e-3 log-likelihood points.
     # Stopping rules in log-likelihood units: converged when no parameter's
     # gradient exceeds `grad_tol`, or an iteration gains < 1e-7. On USD refits
     # this reaches the optimum of the old, much stricter settings to within
@@ -496,10 +518,55 @@ def _fit_from(
                      options=opts)
         res = r if res is None or r.fun < res.fun else res
         free = np.array([not (lo is not None and x <= lo + 1e-9) for x, (lo, _) in zip(res.x, bounds)])
-        if np.max(np.abs(res.jac[free]), initial=0.0) * n_obs < grad_tol:
+        # Converged, or a restart that made no progress: the gradient is at its
+        # numerical floor (~0.01 log-lik units on USD), so further restarts are waste.
+        if np.max(np.abs(res.jac[free]), initial=0.0) * n_obs < grad_tol or (restarts > 1 and r.nit <= 1):
             break
     params = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k)
-    return DNSFit(params=params, loglik=-res.fun * n_obs, n_params=theta0.size, nobs=n_obs,
+    pen = shrinkage_prior(params, *shrink)[0] if shrink is not None else 0.0
+    return DNSFit(params=params, loglik=-res.fun * n_obs - pen, n_params=theta0.size, nobs=n_obs,
                   converged=bool(res.success),
                   message=f"EM {em_done} it; L-BFGS-B x{restarts}: {res.message}",
-                  seconds=time.perf_counter() - t0, columns=cols, estimate_lambda=estimate_lambda)
+                  seconds=time.perf_counter() - t0, columns=cols, estimate_lambda=estimate_lambda,
+                  penalty=pen)
+
+
+def cross_penalty(A: np.ndarray, tau: float, scales: np.ndarray) -> tuple[float, np.ndarray]:
+    """Log of the Gaussian shrinkage prior on the factor<->macro cross terms of A, and its gradient.
+
+    Entries A[i, j] with exactly one of i, j among the 3 factors get prior
+    N(0, (tau * s_i / s_j)^2); all other entries are unpenalised.
+    """
+    k = A.shape[0]
+    idx = np.arange(k)
+    cross = (idx[:, None] < 3) != (idx[None, :] < 3)
+    w = np.where(cross, 1.0 / (tau * scales[:, None] / scales[None, :]) ** 2, 0.0)
+    return float(-0.5 * np.sum(w * A**2)), -w * A
+
+
+def shrinkage_prior(p: DNSParams, tau: float, scales: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
+    """Log prior shrinking every factor<->macro link to zero, with gradients w.r.t. A and the Q-Cholesky vector.
+
+    Two blocks are shrunk:
+
+    - the lagged cross terms of A (`cross_penalty`);
+    - the factor-macro block of the shock covariance. With factors ordered
+      first, Q = L L' has a zero factor-macro block exactly when
+      L[macro, factor] = 0, so those entries get prior N(0, (tau * s_i)^2),
+      roughly a prior of tau on the shock correlations.
+
+    With both blocks at zero the likelihood factorises into the yields-only
+    model times an independent macro VAR. So tau -> 0 reproduces the yields-only
+    forecasts, and tau -> inf is the full DRA model. Shrinking A alone does
+    not: correlated shocks still let macro data re-estimate the curve dynamics.
+    """
+    k = p.k
+    pen_A, dA = cross_penalty(p.A, tau, scales)
+    (rows, cols), diag = _tril(k)
+    L = np.linalg.cholesky(p.Q)
+    l = L[rows, cols]
+    cross = (rows >= 3) & (cols < 3)
+    w = np.where(cross, 1.0 / (tau * scales[rows]) ** 2, 0.0)
+    pen_L = -0.5 * np.sum(w * l**2)
+    dl = -w * l  # no diagonal entries are penalised, so the log-diagonal transform does not enter
+    return pen_A + float(pen_L), dA, dl
