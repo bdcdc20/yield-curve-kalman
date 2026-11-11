@@ -143,3 +143,49 @@ def test_macro_forecasts_have_no_look_ahead_in_yields_or_macro():
     m3.iloc[:100] += 1.0
     other = dns_kalman_forecasts(y, macro=_LaggedMacro(m3), **kw)
     assert not np.allclose(base[1].iloc[0], other[1].iloc[0])
+
+
+# --------------------------------------------------------------------------- step 7b adjustments
+def test_constant_endpoint_leaves_the_forecast_unchanged():
+    # Shifting every yield by a constant moves the sample mean by the same constant; nothing else changes.
+    y = _panel(T=110)
+    kw = dict(horizons=(1, 6), first_origin=y.index[96], reestimate_every=12, n_starts=1)
+    base = dns_kalman_forecasts(y, **kw)
+    shifted = dns_kalman_forecasts(y, endpoint=pd.Series(2.0, index=y.index), **kw)
+    for h in (1, 6):
+        np.testing.assert_allclose(shifted[h].to_numpy(), base[h].to_numpy(), atol=1e-4)
+
+
+def test_endpoint_and_error_ar_have_no_look_ahead():
+    from yck.model.adjust import ewma_endpoint
+    y = _panel(T=130)
+    y.iloc[::7, 0] = np.nan
+    origin = y.index[110]
+    kw = dict(horizons=(1, 6), first_origin=origin, reestimate_every=12, n_starts=1)
+    for extra in (dict(endpoint=ewma_endpoint(y)), dict(error_ar="ar1c"), dict(error_ar="ar1")):
+        base = dns_kalman_forecasts(y, **kw, **extra)
+        y2 = y.copy()
+        y2.iloc[111:] += 3.0
+        extra2 = dict(extra, endpoint=ewma_endpoint(y2)) if "endpoint" in extra else extra
+        after = dns_kalman_forecasts(y2, **kw, **extra2)
+        for h in (1, 6):
+            target = origin + pd.offsets.MonthEnd(h)
+            pd.testing.assert_series_equal(base[h].loc[target], after[h].loc[target])
+
+
+def test_error_ar_adds_the_ar_forecast_of_the_filtered_residual():
+    from yck.model.adjust import error_forecast, fit_error_ar
+    y = _panel(T=110)
+    y["3m"] += 0.3 * np.sin(np.arange(len(y)) / 6)  # a persistent misfit at the short end
+    origin = y.index[100]
+    kw = dict(horizons=(1, 6), first_origin=origin, reestimate_every=12, n_starts=1)
+    fits = []
+    plain = dns_kalman_forecasts(y, fits=fits, **kw)
+    adj = dns_kalman_forecasts(y, error_ar="ar1c", **kw)
+    fit = fits[0][1]
+    a = fit.filtered_states(y.loc[:origin])
+    resid = y.loc[:origin].to_numpy() - a @ fit.statespace().Z.T
+    m, rho = fit_error_ar(resid, "ar1c")
+    for h in (1, 6):
+        t = origin + pd.offsets.MonthEnd(h)
+        np.testing.assert_allclose(adj[h].loc[t] - plain[h].loc[t], error_forecast(m, rho, resid[-1], h), atol=1e-12)

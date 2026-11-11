@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from yck.model.adjust import detrend, error_forecast, fit_error_ar
 from yck.model.dns import DL_LAMBDA, fit_factors, maturities_from_columns, ns_loadings, recursive_dynamics
 from yck.model.statespace_dns import DNSFit, DNSParams, fit_dns_mle
 
@@ -110,9 +111,15 @@ def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> 
 
 
 def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lambda, lam, h_floor_bp, n_starts,
-                macro, shrink_tau):
-    """What a Kalman backtest re-estimates: (y, origins, refit dates, fit settings, panel function)."""
+                macro, shrink_tau, endpoint=None):
+    """What a Kalman backtest re-estimates: (y, origins, refit dates, fit settings, panel function).
+
+    With an `endpoint`, the estimation sample starts at its first available
+    month and `panel` returns the detrended data (`yck.model.adjust.detrend`).
+    """
     y = yields.loc[est_start:] if est_start else yields
+    if endpoint is not None:
+        y = y.loc[endpoint.reindex(y.index).first_valid_index():]
     origins = y.loc[first_origin:].index
     refit_at = list(origins[::reestimate_every])
     settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
@@ -121,9 +128,8 @@ def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lamb
 
     def panel(t):
         """Everything a forecaster had at origin t."""
-        if macro is None:
-            return y.loc[:t]
-        return pd.concat([y.loc[:t], macro.at(t, index=y.index)], axis=1)
+        d = y.loc[:t] if macro is None else pd.concat([y.loc[:t], macro.at(t, index=y.index)], axis=1)
+        return d if endpoint is None else detrend(d, endpoint, y.columns)
 
     return y, origins, refit_at, settings, panel
 
@@ -151,9 +157,10 @@ def prefit(specs: list[dict], jobs: int, cache_dir: str | Path, verbose: bool = 
     for spec in specs:
         kw = {k: v for k, v in spec.items() if k in ("first_origin", "est_start", "reestimate_every",
                                                       "estimate_lambda", "lam", "h_floor_bp", "n_starts",
-                                                      "macro", "shrink_tau")}
+                                                      "macro", "shrink_tau", "endpoint")}
         full = {"first_origin": "2000-01-31", "est_start": None, "reestimate_every": 12, "estimate_lambda": False,
-                "lam": DL_LAMBDA, "h_floor_bp": 1.0, "n_starts": 6, "macro": None, "shrink_tau": None, **kw}
+                "lam": DL_LAMBDA, "h_floor_bp": 1.0, "n_starts": 6, "macro": None, "shrink_tau": None,
+                "endpoint": None, **kw}
         _, _, refit_at, settings, panel = _refit_plan(spec["yields"], **full)
         for t in refit_at:
             sample = panel(t)
@@ -190,6 +197,8 @@ def dns_kalman_forecasts(
     verbose: bool = False,
     macro=None,
     shrink_tau: float | None = None,
+    endpoint: pd.Series | None = None,
+    error_ar: str | None = None,
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
@@ -219,9 +228,21 @@ def dns_kalman_forecasts(
     a new month arrives, only fits what is new.
 
     If `fits` is a list, each (origin, DNSFit) is appended to it.
+
+    Step 7b adjustments (README section 7.6, `yck.model.adjust`):
+
+    - `endpoint` (a monthly real-time series): the level reverts to it instead
+      of to a fixed mean. The model is estimated and filtered on the
+      detrended panel and the origin's endpoint is added back to the forecast.
+      The estimation sample starts where the endpoint does. Refits differ
+      from the plain model's, so they get their own cache entries.
+    - `error_ar` ('ar1' or 'ar1c'): adds the forecast of a per-maturity AR(1)
+      fitted at each origin to the filtered residuals up to that origin. It
+      reuses the plain model's fits (no re-estimation).
     """
     y, origins, refit_at, settings, panel = _refit_plan(yields, first_origin, est_start, reestimate_every,
-                                                        estimate_lambda, lam, h_floor_bp, n_starts, macro, shrink_tau)
+                                                        estimate_lambda, lam, h_floor_bp, n_starts, macro, shrink_tau,
+                                                        endpoint)
     cache = str(cache_dir) if cache_dir else None
     samples = [panel(t) for t in refit_at]
 
@@ -239,17 +260,30 @@ def dns_kalman_forecasts(
         fits.extend(zip(refit_at, fitted))
 
     pos = {d: i for i, d in enumerate(y.index)}
+    shift = np.zeros(len(y)) if endpoint is None else endpoint.reindex(y.index).to_numpy(float)
     out: dict[int, list] = {h: [] for h in horizons}
     for fit, t_fit, t_next in zip(fitted, refit_at, refit_at[1:] + [None]):
         block = origins[(origins >= t_fit) & ((origins < t_next) if t_next is not None else True)]
-        if macro is None:
-            a_filt = fit.filtered_states(y)  # row s uses y up to s only
-            states = {t: a_filt[pos[t]] for t in block}
-        else:
-            states = {t: fit.filtered_states(panel(t))[-1] for t in block}
+        Z = fit.statespace().Z[:len(y.columns)]
+        if macro is None:  # one pass for the block: row s of the filter uses data up to s only
+            whole = panel(y.index[-1])
+            a_whole = fit.filtered_states(whole)
         for t in block:
+            if macro is None:
+                data, a = whole, a_whole
+            else:  # the macro vintage changes with the origin: one filter pass per origin
+                data = panel(t)
+                a = fit.filtered_states(data)
+            i = pos[t]
+            if error_ar is not None:  # residuals up to the origin only
+                Yt = data[y.columns].to_numpy(float)[:i + 1]
+                resid = Yt - a[:i + 1] @ Z.T
+                m, rho = fit_error_ar(resid, error_ar)
             for h in horizons:
-                out[h].append((_target(t, h), fit.forecast(states[t], h)))
+                f = fit.forecast(a[i], h) + shift[i]
+                if error_ar is not None:
+                    f = f + error_forecast(m, rho, resid[-1], h)
+                out[h].append((_target(t, h), f))
     return {
         h: pd.DataFrame(np.array([v for _, v in rows]), index=pd.DatetimeIndex([d for d, _ in rows], name="date"),
                         columns=y.columns)
