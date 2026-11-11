@@ -49,3 +49,10 @@ def test_combine_rejects_unknown_weights():
     actual, good, bad = _setup()
     with pytest.raises(ValueError):
         combine({"g": good}, actual, 1, "best")
+
+
+def test_returned_weights_sum_to_one_and_reproduce_the_combination():
+    actual, good, bad = _setup()
+    c, w = combine({"g": good, "b": bad}, actual, 1, "inv_mse", return_weights=True)
+    np.testing.assert_allclose((w["g"] + w["b"]).to_numpy(), 1.0)
+    np.testing.assert_allclose(c.to_numpy(), (w["g"] * good.loc[c.index] + w["b"] * bad.loc[c.index]).to_numpy())

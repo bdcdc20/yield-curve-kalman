@@ -24,8 +24,12 @@ MIN_OBS = 24  # realised errors each model needs before performance weights repl
 
 
 def combine(forecasts: dict[str, pd.DataFrame], actual: pd.DataFrame, h: int, weights: str = "equal",
-            min_obs: int = MIN_OBS) -> pd.DataFrame:
-    """Combined h-step forecast, indexed by target date, columns as in `actual`."""
+            min_obs: int = MIN_OBS, return_weights: bool = False):
+    """Combined h-step forecast, indexed by target date, columns as in `actual`.
+
+    With `return_weights`, also returns {model: DataFrame of its normalised
+    weight by target date and maturity} (NaN where nothing is combined).
+    """
     if weights not in ("equal", "inv_mse"):
         raise ValueError(f"weights must be 'equal' or 'inv_mse', not {weights!r}")
     cols = list(actual.columns)
@@ -55,4 +59,9 @@ def combine(forecasts: dict[str, pd.DataFrame], actual: pd.DataFrame, h: int, we
     tot = W.sum(axis=0)
     with np.errstate(invalid="ignore"):
         out = np.where(tot > 0, (W * np.nan_to_num(F)).sum(axis=0) / tot, np.nan)
-    return pd.DataFrame(out, index=cal, columns=cols).loc[idx.min():idx.max()].dropna(how="all")
+    res = pd.DataFrame(out, index=cal, columns=cols).dropna(how="all")
+    if not return_weights:
+        return res
+    with np.errstate(invalid="ignore"):
+        Wn = np.where(tot > 0, W / tot, np.nan)
+    return res, {n: pd.DataFrame(Wn[i], index=cal, columns=cols).loc[res.index] for i, n in enumerate(forecasts)}
