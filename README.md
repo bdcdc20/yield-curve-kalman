@@ -77,7 +77,14 @@ Notes:
 
 ## 2. Project status
 
-As of 11 Nov 2026:
+As of 11 Nov 2026. **Note:** the result tables in this section and in §7.4
+were produced with an *estimated* long-run mean μ. Since 11 Nov μ is fixed at
+the real-time sample mean (§6.3); the tables and notebooks 02–04 are being
+regenerated. First comparison at h = 12 (RMSE / RW): the USD policy-rate model
+improves from 0.88 / 0.98 / 1.06 / 1.17 / 1.11 to 0.87 / 0.96 / 1.04 / 1.12 /
+1.07 (3m … 10y) and the USD 10y bias in 2000–07 falls from +52 to +37 bp; EUR
+gets slightly worse (reverting to the 2004–09 mean hurts in the negative-rate
+decade), GBP is mixed.
 
 | Stage | Status |
 |---|---|
@@ -299,9 +306,20 @@ $$
 
 Implementation notes:
 
-- **Parameters:** $\mu$ (3), $A$ (9), $Q$ via its Cholesky factor (6),
+- **Parameters:** $A$ (9), $Q$ via its Cholesky factor (6),
   $\log \operatorname{diag}(H)$ (17), and $\lambda$ (1, estimate it as
   $\exp$ of a free parameter, or fix it at 0.0609 first).
+- **Long-run mean $\mu$: fixed at the sample mean** (default since 11 Nov
+  2026, `fit_dns_mle(mu="sample")`; `mu="mle"` estimates it). At each refit,
+  $\mu$ is the mean of the month-by-month OLS factors and of the observed
+  macro series *up to the origin*, so there is no look-ahead. Why: near a unit
+  root $c = (I - A)\mu$ barely depends on $\mu$, so the ML estimate is not
+  identified. On GBP 1993–2012 it was −152% for Bank Rate and −93% for the
+  level, the optimiser stopped at the stationarity cap, and repeated runs
+  scattered by ~260 log-likelihood points. With $\mu$ fixed every refit is
+  interior (largest spectral radius in the whole grid 0.998), runs from
+  different starts agree exactly, and the grid fits ~3× faster. The
+  estimated μ was also behind the USD mean-reversion bias (§2: μ of 6–8%).
 - **Initial state:** the unconditional mean $\mu$, with the unconditional
   covariance from the discrete Lyapunov equation
   ($P_0 = A P_0 A' + Q$, `scipy.linalg.solve_discrete_lyapunov`).
@@ -311,9 +329,9 @@ Implementation notes:
   the optimiser used to stop at explosive $A$ (USD shrinkage models, EUR,
   GBP). Estimates are therefore required to be stationary: the search runs
   unrestricted, and a run that ends explosive is redone with explosive values
-  rejected (`statespace_dns._fit_from`). Where the data want a unit root
-  (GBP Bank Rate 1993–2012) the estimate sits at the cap (spectral radius
-  0.9999), and that repair is not yet reliable (open issue, §8).
+  rejected, and on the boundary surface if the cap binds
+  (`statespace_dns._fit_from`). With μ fixed (below) neither happens in the
+  current grid.
 - **Missing data:** at each $t$, keep only the rows of $y_t$, $\Lambda$ and
   $H$ for observed maturities; skip the update entirely if none are
   observed. This is how the GBP short-end gaps are handled.
@@ -616,7 +634,8 @@ premium), and that is the bar a model must clear.
    shrinkage τ: 24 backtests, 488 refits) took **1,238 s** of fitting run as 24
    separate commands; it now takes **~250 s** end to end with
    `python -m yck backtest --ccy USD EUR GBP --all`, with bit-identical
-   outputs. Profiling showed 87–89% of each fit inside the filter/smoother
+   outputs, and **95 s** after μ was fixed at the sample mean (§6.3; a
+   better-conditioned likelihood, not a speed trick). Profiling showed 87–89% of each fit inside the filter/smoother
    pass, and the predicted covariance converging within ~4 months.
 
    | | Before | After | How |
@@ -627,6 +646,7 @@ premium), and that is the bar a model must clear.
    | Scheduling | one pool and one barrier per backtest | one pool for all refits, longest first (LPT) | `prefit`, `--all` |
    | Real-time macro panels | rebuilt per call | memoised by origin | shared by refits, forecasts and variants |
    | Full grid, fitting / planning + forecasts | 1,238 s / ~50 s | 244 s / 10 s | all of the above |
+   | Full grid after fixing μ (§6.3) | | 86 s / 9 s | fewer, better-conditioned iterations |
 
    Tested and rejected: finishing only one scout per likelihood basin (14%
    faster, but lost 0.2–0.6 log-likelihood points on the flat macro ridges);
@@ -654,12 +674,12 @@ premium), and that is the bar a model must clear.
    missing-short-end handling. Cross-currency comparison. Done: backtests for
    the standard grid (GBP estimated from 1993, inflation targeting), `cw_table`,
    draft `notebooks/04_eur_gbp.ipynb` (GBP short end evaluated at 6m: the BoE
-   3m exists for only 39 months since 2010). **Open issue before results:**
-   where the stationary optimum sits on the radius cap (GBP policy rate, some
-   shrunk fits), the restricted re-run lands at different points from
-   different starts (log-likelihood spread of ~250 on GBP 2012-01); it needs
-   a proper constrained optimisation on the boundary, or a decision to allow
-   a unit root.
+   3m exists for only 39 months since 2010). The boundary issue found here is
+   resolved by fixing μ at the sample mean (§6.3); a fit that still ends on
+   the stationarity cap is optimised on the boundary surface
+   ($A = r\,B/\rho(B)$, exact gradient), which no longer triggers anywhere in
+   the grid. Remaining: regenerate notebooks 02–04 and every results table
+   with fixed μ, then the cross-currency write-up.
 8. **Trading evaluation (`src/yck/eval/trading.py`, §7.5), last, once the
    models are final.** Excess returns from the curves, carry / roll-down
    benchmark, then strategies: short-rate vs forwards first, then duration,

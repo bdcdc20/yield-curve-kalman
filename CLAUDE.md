@@ -31,7 +31,7 @@ evaluation protocol, the roadmap and the decisions already made.
   leads macro more than the reverse. Next: EUR/GBP (step 7), trading last.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. `python -m yck backtest --ccy USD EUR GBP --all`
-  runs the whole standard grid (24 backtests, 488 refits) in ~4 min from
+  runs the whole standard grid (24 backtests, 488 refits) in ~1.5 min from
   scratch on 8 cores, ~10 s from cache, in one longest-first pool. Bump
   `FIT_CACHE_VERSION` in `eval/backtest.py` whenever the estimator changes,
   and compare new outputs with the old ones (they should be identical unless
@@ -46,7 +46,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 109 passed
+python3 -m pytest -q                  # expect 113 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```
