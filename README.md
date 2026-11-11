@@ -166,6 +166,7 @@ src/yck/
   model/irf.py              impulse responses (Cholesky, generalised), variance decompositions, bands from the observed information
   eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, forwards, RMSE tables
   eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, ratio/significance tables
+  eval/grid.py              the standard grid of backtests as one job (CLI `backtest --all`, notebooks' `ensure_results`)
 notebooks/                  analysis notebooks, committed with outputs
 tests/                      offline tests: parsers (small samples in each source's real format), real-time panels, DNS, Kalman, backtest, stats, IRFs
 .github/workflows/
@@ -647,6 +648,17 @@ premium), and that is the bar a model must clear.
    | Real-time macro panels | rebuilt per call | memoised by origin | shared by refits, forecasts and variants |
    | Full grid, fitting / planning + forecasts | 1,238 s / ~50 s | 244 s / 10 s | all of the above |
    | Full grid after fixing μ (§6.3) | | 86 s / 9 s | fewer, better-conditioned iterations |
+
+   **Notebooks and data plumbing** (same rules: profile, then change, then
+   check outputs are identical). All four notebooks run in ~22 s together
+   from the cache (01: 3 s, 02: 4 s, 03: 6 s, 04: 8 s); what is left is
+   full-sample fits, matplotlib and imports.
+
+   | | Before | After | How |
+   |---|---|---|---|
+   | 320 USD real-time macro panels | 2.95 s | 0.32 s | `to_monthly` fast path for series already one-per-month (numpy month arithmetic, y/y as a 12-month array shift; the generic path rebuilt a calendar in pure Python each call), and `VintageTable`: each ALFRED table preprocessed once into sorted arrays, so a vintage lookup is two vectorised comparisons. Identical on all 1,004 USD (series, origin) pairs |
+   | 1,000 impulse-response draws (6 states, 60 months) | ~0.5 s | 0.012 s | all draws as stacks of matrices (batched eigenvalues, Cholesky, matrix powers) instead of a Python loop; same random stream, identical draws |
+   | Notebooks on a fresh clone | each launched its own backtests | one shared grid run | `eval.grid.ensure_results` (same code as `backtest --all`) |
 
    Tested and rejected: finishing only one scout per likelihood basin (14%
    faster, but lost 0.2–0.6 log-likelihood points on the flat macro ridges);
