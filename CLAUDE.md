@@ -30,7 +30,9 @@ evaluation protocol, the roadmap and the decisions already made.
   estimates are required to be stationary (README §6.3). Result: no model
   beats forwards significantly in any currency; the policy rate helps only
   in USD; EUR loses to the random walk through mean reversion. Next: the
-  trading evaluation (step 8), then the write-up (step 9).
+  accuracy improvements in README §8 step 7b (diagnosis and literature in
+  §7.6; start with AR(1) measurement errors and a shifting endpoint for the
+  level), then the trading evaluation (step 8), then the write-up (step 9).
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. `python -m yck backtest --ccy USD EUR GBP --all`
   runs the whole standard grid (24 backtests, 488 refits) in ~1.5 min from
