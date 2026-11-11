@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from yck.model.adjust import detrend, error_forecast, fit_error_ar
+from yck.model.adjust import anchor_mean, detrend, error_forecast, fit_error_ar, yield_forecast_cov
 from yck.model.dns import DL_LAMBDA, fit_factors, maturities_from_columns, ns_loadings, recursive_dynamics
 from yck.model.statespace_dns import DNSFit, DNSParams, fit_dns_mle
 
@@ -199,6 +199,8 @@ def dns_kalman_forecasts(
     shrink_tau: float | None = None,
     endpoint: pd.Series | None = None,
     error_ar: str | None = None,
+    anchor: pd.DataFrame | None = None,
+    anchor_columns=("3m", "6m", "9m", "12m"),
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
@@ -239,6 +241,11 @@ def dns_kalman_forecasts(
     - `error_ar` ('ar1' or 'ar1c'): adds the forecast of a per-maturity AR(1)
       fitted at each origin to the filtered residuals up to that origin. It
       reuses the plain model's fits (no re-estimation).
+    - `anchor` (a `curves_ext` panel): tilts each forecast so that the
+      `anchor_columns` equal their forward rates at the origin
+      (`yck.model.adjust.anchor_mean`), using the model's forecast covariance
+      from P_{t|t}. Forwards whose inputs are missing are not used. Also no
+      re-estimation.
     """
     y, origins, refit_at, settings, panel = _refit_plan(yields, first_origin, est_start, reestimate_every,
                                                         estimate_lambda, lam, h_floor_bp, n_starts, macro, shrink_tau,
@@ -264,16 +271,25 @@ def dns_kalman_forecasts(
     out: dict[int, list] = {h: [] for h in horizons}
     for fit, t_fit, t_next in zip(fitted, refit_at, refit_at[1:] + [None]):
         block = origins[(origins >= t_fit) & ((origins < t_next) if t_next is not None else True)]
-        Z = fit.statespace().Z[:len(y.columns)]
+        ss = fit.statespace()
+        n = len(y.columns)
+        Z = ss.Z[:n]
+
+        def states(d):  # filtered states, plus their covariances when anchoring needs them
+            if anchor is None:
+                return fit.filtered_states(d), None
+            r = fit.filter(d)
+            return r.a_filt, r.P_filt
+
         if macro is None:  # one pass for the block: row s of the filter uses data up to s only
             whole = panel(y.index[-1])
-            a_whole = fit.filtered_states(whole)
+            whole_states = states(whole)
         for t in block:
             if macro is None:
-                data, a = whole, a_whole
+                data, (a, P) = whole, whole_states
             else:  # the macro vintage changes with the origin: one filter pass per origin
                 data = panel(t)
-                a = fit.filtered_states(data)
+                a, P = states(data)
             i = pos[t]
             if error_ar is not None:  # residuals up to the origin only
                 Yt = data[y.columns].to_numpy(float)[:i + 1]
@@ -283,6 +299,13 @@ def dns_kalman_forecasts(
                 f = fit.forecast(a[i], h) + shift[i]
                 if error_ar is not None:
                     f = f + error_forecast(m, rho, resid[-1], h)
+                if anchor is not None:
+                    fwd = np.full(n, np.nan)
+                    for col in anchor_columns:
+                        if col in y.columns and t in anchor.index:
+                            fwd[y.columns.get_loc(col)] = _forward_rate(anchor.loc[t], maturities_from_columns([col])[0], h)
+                    cov = yield_forecast_cov(ss.T, ss.Q, Z, ss.H[:n, :n], P[i], h)
+                    f = anchor_mean(f, cov, fwd)
                 out[h].append((_target(t, h), f))
     return {
         h: pd.DataFrame(np.array([v for _, v in rows]), index=pd.DatetimeIndex([d for d, _ in rows], name="date"),
@@ -304,6 +327,14 @@ def random_walk_forecasts(yields: pd.DataFrame, horizons=(1, 6, 12), first_origi
         fc.index = pd.DatetimeIndex([_target(t, h) for t in base.index], name="date")
         out[h] = fc
     return out
+
+
+def _forward_rate(row: pd.Series, tau: float, h: int) -> float:
+    """F_t(h, tau) = [(tau + h) y_t(tau + h) - h y_t(h)] / tau from one curves_ext row; NaN if an input is missing."""
+    far, near = f"{int(tau + h)}m", f"{int(h)}m"
+    if far not in row.index or near not in row.index:
+        return np.nan
+    return float(((tau + h) * row[far] - h * row[near]) / tau)
 
 
 def forward_forecasts(curves_ext: pd.DataFrame, columns, horizons=(1, 6, 12),

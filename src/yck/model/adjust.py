@@ -33,6 +33,19 @@ maturity by maturity with an AR(1), and the forecast becomes
     y_{t+h|t} = Lambda f_{t+h|t} + m + rho^h (e_t - m)
 
 (`ar1c`: Raviv 2013, with an intercept m), or with m = 0 (`ar1`).
+
+**Anchoring the short end to forwards (failure 4, step 7b item 4).** The
+forward curve carries the market's expected policy path, which the model
+does not see. Following Altavilla, Giacomini & Ragusa (2017), the model's
+Gaussian h-step forecast N(mu, Sigma) of the curve is exponentially tilted, the
+smallest change in Kullback-Leibler terms, so that the means of the short
+maturities s equal their forward rates F:
+
+    mu* = mu + Sigma[:, s] Sigma[s, s]^-1 (F - mu[s]).
+
+The short end then equals the forwards and the rest of the curve moves by
+its forecast covariance with the short end (`anchor_mean`). Sigma is the
+model's own: Lambda P_{t+h|t} Lambda' + H (`yield_forecast_cov`).
 """
 from __future__ import annotations
 
@@ -119,3 +132,27 @@ def error_forecast(m: np.ndarray, rho: np.ndarray, e_t: np.ndarray, h: int) -> n
     """E[e_{t+h} | e_t] = m + rho^h (e_t - m); where e_t is missing (yield not observed at t), m."""
     dev = np.where(np.isfinite(e_t), e_t - m, 0.0)
     return m + rho ** h * dev
+
+
+# --------------------------------------------------------------------------- anchoring to forwards
+def yield_forecast_cov(T: np.ndarray, Q: np.ndarray, Z: np.ndarray, H: np.ndarray, P_filt_t: np.ndarray,
+                       h: int) -> np.ndarray:
+    """Covariance of y_{t+h} given data up to t: Z P_{t+h|t} Z' + H, P_{t+h|t} = T^h P_{t|t} T^h' + sum T^i Q T^i'."""
+    P = np.asarray(P_filt_t, float)
+    for _ in range(h):
+        P = T @ P @ T.T + Q
+    return Z @ P @ Z.T + H
+
+
+def anchor_mean(mean: np.ndarray, cov: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Tilt a Gaussian forecast N(mean, cov) so that E[y_j] = target_j wherever target_j is finite.
+
+    The minimum-KL tilt of a Gaussian under linear mean constraints keeps the
+    covariance and moves the mean by cov[:, s] cov[s, s]^-1 (target_s - mean_s).
+    With no finite target the mean is returned unchanged.
+    """
+    s = np.flatnonzero(np.isfinite(target))
+    if s.size == 0:
+        return np.asarray(mean, float).copy()
+    gap = target[s] - mean[s]
+    return mean + cov[:, s] @ np.linalg.solve(cov[np.ix_(s, s)], gap)

@@ -189,3 +189,33 @@ def test_error_ar_adds_the_ar_forecast_of_the_filtered_residual():
     for h in (1, 6):
         t = origin + pd.offsets.MonthEnd(h)
         np.testing.assert_allclose(adj[h].loc[t] - plain[h].loc[t], error_forecast(m, rho, resid[-1], h), atol=1e-12)
+
+
+def _ext(y):
+    """A curves_ext panel with the extra maturities the 3m-12m forwards need at h = 1, 6 (from the same factors)."""
+    from yck.model.dns import fit_factors
+    f = fit_factors(y).to_numpy()
+    mats = sorted({1, 6} | {m + h for m in (3, 6, 9, 12) for h in (1, 6)} | set(GRID))
+    return pd.DataFrame(f @ ns_loadings(mats).T, index=y.index, columns=[f"{m}m" for m in mats])
+
+
+def test_anchored_forecasts_match_forwards_at_the_short_end_and_have_no_look_ahead():
+    y = _panel(T=120)
+    y["9m"] = y["12m"]  # an extra anchored maturity
+    ext = _ext(y)
+    origin = y.index[100]
+    kw = dict(horizons=(1, 6), first_origin=origin, reestimate_every=12, n_starts=1)
+    plain = dns_kalman_forecasts(y, **kw)
+    anc = dns_kalman_forecasts(y, anchor=ext, **kw)
+    fw = forward_forecasts(ext, y.columns, (1, 6), origin)
+    for h in (1, 6):
+        t = origin + pd.offsets.MonthEnd(h)
+        np.testing.assert_allclose(anc[h].loc[t, ["3m", "9m", "12m"]], fw[h].loc[t, ["3m", "9m", "12m"]], atol=1e-10)
+        assert not np.allclose(anc[h].loc[t, "120m"], plain[h].loc[t, "120m"])  # the long end moves too
+    y2, ext2 = y.copy(), ext.copy()
+    y2.iloc[101:] += 3.0
+    ext2.iloc[101:] += 3.0
+    after = dns_kalman_forecasts(y2, anchor=ext2, **kw)
+    for h in (1, 6):
+        t = origin + pd.offsets.MonthEnd(h)
+        pd.testing.assert_series_equal(anc[h].loc[t], after[h].loc[t])

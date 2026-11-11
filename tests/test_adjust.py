@@ -88,3 +88,32 @@ def test_error_forecast_decays_to_the_mean_and_handles_missing():
     e_t = np.array([0.5, np.nan])
     np.testing.assert_allclose(error_forecast(m, rho, e_t, 1), [0.1 + 0.5 * 0.4, 0.0])
     np.testing.assert_allclose(error_forecast(m, rho, e_t, 200), [0.1, 0.0], atol=1e-12)
+
+
+# --------------------------------------------------------------------------- anchoring to forwards
+def test_anchor_mean_hits_the_targets_and_is_the_gaussian_conditional_mean():
+    from yck.model.adjust import anchor_mean
+    rng = np.random.default_rng(0)
+    B = rng.normal(size=(5, 5))
+    cov = B @ B.T + 0.1 * np.eye(5)
+    mean = rng.normal(size=5)
+    target = np.array([1.0, np.nan, 2.0, np.nan, np.nan])
+    out = anchor_mean(mean, cov, target)
+    np.testing.assert_allclose(out[[0, 2]], [1.0, 2.0])
+    s, r = [0, 2], [1, 3, 4]
+    ref = mean[r] + cov[np.ix_(r, s)] @ np.linalg.solve(cov[np.ix_(s, s)], target[s] - mean[s])
+    np.testing.assert_allclose(out[r], ref)
+    np.testing.assert_allclose(anchor_mean(mean, cov, np.full(5, np.nan)), mean)
+    # A maturity uncorrelated with the anchored ones does not move.
+    cov2 = np.diag([1.0, 2.0, 3.0])
+    np.testing.assert_allclose(anchor_mean(np.zeros(3), cov2, np.array([1.0, np.nan, np.nan])), [1.0, 0, 0])
+
+
+def test_yield_forecast_cov_recursion():
+    from yck.model.adjust import yield_forecast_cov
+    T = np.array([[0.9, 0.1], [0.0, 0.5]])
+    Q, Z, H = np.diag([0.2, 0.1]), np.array([[1.0, 0.5], [1.0, 0.0], [0.0, 1.0]]), 0.01 * np.eye(3)
+    P0 = np.diag([0.3, 0.4])
+    P2 = T @ (T @ P0 @ T.T + Q) @ T.T + Q
+    np.testing.assert_allclose(yield_forecast_cov(T, Q, Z, H, P0, 2), Z @ P2 @ Z.T + H)
+    np.testing.assert_allclose(yield_forecast_cov(T, Q, Z, H, P0, 0), Z @ P0 @ Z.T + H)
