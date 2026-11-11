@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 140 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints and AR(1) errors without look-ahead), all passing (`pytest -q`) |
+| Offline tests | **Done.** 141 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -92,7 +92,7 @@ real-time sample mean (§6.3).
 | Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
-| Accuracy improvements from the literature | **Items 1–2 done** (`model/adjust.py`, `notebooks/05_accuracy.ipynb`, results in §7.7): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance. Items 3–8 not started (§8 step 7b; next: forecast combination, forward anchoring) |
+| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–8 not started (§8 step 7b) |
 | Trading evaluation | Not started (§7.5; after §8 step 7b) |
 | Final write-up | Not started (§8, step 9) |
 
@@ -184,6 +184,22 @@ a model confidence set covers every model in the project.
 - **Still nothing beats forwards or the random walk at h = 6–12**, and the
   confidence set cannot separate the models there.
 
+**Step 7b items 3–4 (`notebooks/06_combination_anchor.ipynb`, details in
+§7.8).**
+
+- **Anchoring** the model's 3m–12m forecasts to forwards (exponential
+  tilting) cuts EUR RMSE by 23–46% at 3m–2y (h = 6–12). It hardly moves the
+  10y, and outside EUR it makes the long end worse (GBP 10y, h = 12:
+  1.11–1.13 × forwards).
+- **Combining** the model (with AR(1) errors) with the two-step VAR,
+  forwards and the random walk gives the first forecasts at or below
+  forwards at the 10y in every currency (h = 12: USD 0.93–0.94, EUR
+  0.97–1.02, GBP 0.98–1.00). These are mostly not significant, and still
+  1.05–1.13 × the random walk there.
+- **Overall ranking** (pooled squared error over 30–42 models): a
+  combination is best in USD at every horizon, forwards are best in EUR,
+  and the random walk in GBP at h = 1 and 12.
+
 ## 3. Repository layout
 
 ```
@@ -199,10 +215,11 @@ src/yck/
   model/kalman.py           Kalman filter (missing rows), log-likelihood, RTS smoother, smoother sufficient statistics (compiled)
   model/statespace_dns.py   ML DNS (yields only or yields + macro): transforms, EM, exact score, multistart L-BFGS-B, 1 bp floor, shrinkage prior
   model/irf.py              impulse responses (Cholesky, generalised), variance decompositions, bands from the observed information
-  model/adjust.py           forecast adjustments outside the likelihood: shifting endpoints (EWMA, surveys), AR(1) measurement errors
+  model/adjust.py           forecast adjustments outside the likelihood: shifting endpoints (EWMA, surveys), AR(1) measurement errors, tilting to forwards
   eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, forwards, RMSE tables
   eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, model confidence set, ratio/significance tables
-  eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy`, notebooks' `ensure_results`)
+  eval/combine.py           forecast combination: equal and real-time inverse-MSE weights
+  eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy | --anchor`, notebooks' `ensure_results`), combinations
 notebooks/                  analysis notebooks, committed with outputs
 tests/                      offline tests: parsers (small samples in each source's real format), real-time panels, DNS, Kalman, backtest, stats, IRFs
 .github/workflows/
@@ -808,6 +825,57 @@ forecast − realised):**
   keeps 20–34 models at every maturity. The remaining gap is failure 4, the
   information in the forward curve, which items 3–4 of step 7b target.
 
+### 7.8 Results: anchoring to forwards and forecast combination (step 7b items 3–4)
+
+`notebooks/06_combination_anchor.ipynb`. The grid (§8 step 7b) was committed
+before it was run.
+
+**Anchoring.** Ratio to the same model unanchored at h = 6–12 (DM). Ranges
+cover yields / policy rate, plain and AR(1):
+
+| | Short end | 1–2y | 5y | 10y |
+|---|---|---|---|---|
+| EUR | 3m: 0.54–0.70 | 0.69–0.77 | 0.82–0.92 | 0.91–0.99 |
+| USD, h = 12 | 3m: 1.00–1.02 | 1.00–1.01 | 1.03–1.05 | 1.08–1.10 |
+
+- **EUR short end.** The euro short end goes from 1.4–1.9 × forwards to
+  parity.
+- **The 10y hardly moves.** In January 2015 the 3m forecast for a year
+  later fell 158 bp (from 1.47% to −0.11%), the 10y only 17 bp. The tilt
+  moves mostly the slope and curvature factors.
+- **USD and GBP long end.** The model's short end was already level with
+  forwards, so the tilt only adds noise further out. GBP 10y at h = 12 is
+  1.11–1.13 × forwards (significant at 1–5%).
+- **Literature.** Altavilla et al. tilt to surveys, and their gains are not
+  reproduced with forwards.
+- **Decision.** Not adopted: it removes any short-end signal against
+  forwards by construction.
+
+**Combinations, RMSE ratio at h = 12** (range over sets A/B and
+equal/inverse-MSE weights):
+
+| | ÷ forwards, 5y | ÷ forwards, 10y | ÷ random walk, 10y |
+|---|---|---|---|
+| USD | 0.95–0.96 | 0.93–0.94 | 1.05 |
+| EUR | 0.99–1.06 | 0.97–1.02 | 1.08–1.13 |
+| GBP | 0.94–0.96 | 0.98–1.00 | 1.06–1.08 |
+
+- **Significance.** Significant only for EUR 10y at h = 1 (0.98**) and GBP
+  5y at h = 6 (0.96*).
+- **Weights.** Inverse-MSE weights help in EUR, where the model's weight
+  falls, and match equal weights elsewhere.
+- **Set B.** Adding the policy-rate model helps nowhere.
+- **Pooled ranking** (all 42 USD / 36 EUR / 30 GBP models):
+  - USD: a combination is first at every horizon; forwards rank 4th–9th and
+    the random walk 10th–17th.
+  - EUR: forwards are first.
+  - GBP: the random walk is first at h = 1 and 12.
+- **Confidence set.** It keeps 28–42 of 30–42 models at h = 6–12.
+
+**For step 8:**
+- trade combination A with inverse-MSE weights;
+- keep yields + AR(1) as the pure-model signal.
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -906,9 +974,13 @@ forecast − realised):**
    required to be stationary, and μ is fixed at the real-time sample mean
    (§6.3), which made every fit well-posed and changed all Kalman results
    (USD RMSE ratios improved by 0.01–0.07).
-7b. **Accuracy improvements (§7.6), in this order.** Items 1–2 ✅ (results in
-   §7.7: AR(1) errors adopted for h = 1, endpoints not adopted); next: item 3,
-   then 4. Fix the full grid of
+7b. **Accuracy improvements (§7.6), in this order.** Items 1–4 ✅:
+   - items 1–2 (§7.7): AR(1) errors adopted for h = 1, endpoints not
+     adopted;
+   - items 3–4 (§7.8): combination A with inverse-MSE weights adopted for
+     step 8, anchoring not adopted.
+
+   Items 5–8 are not started. Fix the full grid of
    variants before running it, report every variant, and add a model
    confidence set across all models to the DM/CW tables, to avoid data
    snooping. Each step keeps real-time data and filtered states (§7.3).
