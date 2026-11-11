@@ -205,3 +205,50 @@ def test_compiled_filtered_states_match_reference():
     model, y = _dns_like_system()
     y = _with_gaps(y)
     np.testing.assert_allclose(filtered_states(model, y), kalman_filter(model, y).a_filt, atol=1e-10)
+
+
+@pytest.mark.parametrize("gaps", ["none", "scattered short end", "ragged edge"])
+def test_steady_state_shortcuts_match_the_full_recursion(gaps):
+    """Freezing the converged covariances (filter and smoother) must not change any output."""
+    from yck.model.kalman import kalman_loglik, smoothed_stats, filtered_states
+    from yck.model.statespace_dns import DNSParams
+
+    tau = np.array([3, 6, 12, 24, 36, 60, 84, 120], float)
+    rng = np.random.default_rng(11)
+    k = 4  # 3 factors + one macro series, observed (almost) without error
+    A = np.diag([0.97, 0.9, 0.8, 0.95]); A[0, 3] = 0.05
+    p = DNSParams(mu=np.array([5.0, -1.5, 0.0, 3.0]), A=A, Q=np.diag([0.04, 0.09, 0.25, 0.1]),
+                  h=np.full(len(tau), 0.03**2), lam=0.0609)
+    ss = p.statespace(tau)
+    N = 400
+    x = np.empty((N, k)); x[0] = p.mu
+    for t in range(1, N):
+        x[t] = ss.c + A @ x[t - 1] + rng.normal(size=k) * np.sqrt(np.diag(p.Q))
+    Y = x @ ss.Z.T + rng.normal(size=(N, len(tau) + 1)) * np.sqrt(np.diag(ss.H))
+    if gaps == "scattered short end":
+        Y[rng.random(N) < 0.4, 0] = np.nan
+        Y[rng.random(N) < 0.15, 1] = np.nan
+    elif gaps == "ragged edge":
+        Y[-2:, -1] = np.nan
+        Y[100:103, :] = np.nan  # months with nothing observed
+
+    assert kalman_loglik(ss, Y) == pytest.approx(kalman_loglik(ss, Y, tol=-1.0), rel=1e-12, abs=1e-8)
+    np.testing.assert_allclose(filtered_states(ss, Y), filtered_states(ss, Y, tol=-1.0), rtol=1e-10, atol=1e-10)
+    fast, ref = smoothed_stats(ss, Y), smoothed_stats(ss, Y, tol=-1.0)
+    assert fast.loglik == pytest.approx(ref.loglik, rel=1e-12, abs=1e-8)
+    for name in ("n_i", "syy", "sya", "sxx", "S11", "S10", "S00", "a_s", "P_s"):
+        np.testing.assert_allclose(getattr(fast, name), getattr(ref, name), rtol=1e-9, atol=1e-9, err_msg=name)
+
+
+def test_compiled_lyapunov_matches_scipy():
+    from scipy.linalg import solve_discrete_lyapunov
+    from yck.model.kalman import lyapunov
+
+    rng = np.random.default_rng(2)
+    for k in (3, 4, 6):
+        A = rng.normal(size=(k, k))
+        A *= 0.97 / np.max(np.abs(np.linalg.eigvals(A)))
+        M = rng.normal(size=(k, k))
+        Q = M @ M.T
+        np.testing.assert_allclose(lyapunov(A, Q), solve_discrete_lyapunov(A, Q), rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(lyapunov(A.T, Q), solve_discrete_lyapunov(A.T, Q), rtol=1e-10, atol=1e-12)

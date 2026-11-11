@@ -74,7 +74,7 @@ def stationary_init(T: np.ndarray, Q: np.ndarray, c: np.ndarray | None = None):
         raise ValueError("transition matrix is not stable; no stationary distribution")
     c = np.zeros(k) if c is None else np.asarray(c, float)
     a1 = np.linalg.solve(np.eye(k) - T, c)
-    P1 = solve_discrete_lyapunov(T, Q)
+    P1 = lyapunov(T, Q)
     return a1, (P1 + P1.T) / 2
 
 
@@ -128,6 +128,15 @@ def kalman_filter(model: StateSpace, y) -> FilterResult:
                         a_filt=a_filt, P_filt=P_filt, n_obs=n_obs)
 
 
+# Steady-state shortcut (README section 8, step 4d). P_{t|t-1} does not depend on
+# the data, only on the parameters and on which series are observed, and for
+# these models it converges within a few months. Once successive predicted
+# covariances agree to STEADY_TOL (relative) and the observation pattern is
+# unchanged, the filter stops recomputing P, its inverse and log-determinants,
+# and the smoother reuses its gain. Any change in the pattern recomputes from
+# that month on. A negative tolerance switches the shortcut off (used in tests).
+STEADY_TOL = 1e-13
+
 try:
     from numba import njit
 
@@ -138,6 +147,31 @@ except ImportError:  # numba is optional: the loops below then run as plain (slo
         return f
 
     HAVE_NUMBA = False
+
+
+@_jit
+def _lyapunov_direct(A, Q):
+    k = A.shape[0]
+    lhs = -np.kron(A, A)
+    for i in range(k * k):
+        lhs[i, i] += 1.0
+    return np.linalg.solve(lhs, Q.ravel().copy()).reshape(k, k)
+
+
+def lyapunov(A: np.ndarray, Q: np.ndarray) -> np.ndarray:
+    """Solve P = A P A' + Q for small A: (I - A kron A) vec(P) = vec(Q).
+
+    The same direct method as `scipy.linalg.solve_discrete_lyapunov` (which
+    is what this replaces), compiled: for k <= 6 the 36 x 36 solve itself takes
+    microseconds, and scipy's Python wrappers cost ~10x more. It is called
+    twice per likelihood evaluation (stationary prior, and the adjoint in the
+    score).
+    """
+    A = np.ascontiguousarray(A, dtype=float)
+    Q = np.ascontiguousarray(Q, dtype=float)
+    if not HAVE_NUMBA:
+        return solve_discrete_lyapunov(A, Q)
+    return _lyapunov_direct(A, Q)
 
 
 @_jit
@@ -164,7 +198,7 @@ def _chol_logdet(F):
 
 
 @_jit
-def _forward_dense(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
+def _forward_dense(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt, frz):
     """Covariance-form filter (as in `kalman_filter`), used when H is not diagonal.
 
     Fills a_pred/P_pred/a_filt/P_filt in place (pass arrays with a zero
@@ -174,6 +208,8 @@ def _forward_dense(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
     """
     N, n = y.shape
     store = a_pred.shape[0] > 0
+    if frz.shape[0] > 0:
+        frz[:] = False  # no steady-state shortcut in the dense form
     a = a1.copy()
     P = P1.copy()
     ll = 0.0
@@ -239,7 +275,29 @@ def _chol_inv_logdet(M):
 
 
 @_jit
-def _forward_info(y, Z, h, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
+def _max_abs_diff(A, B):
+    m = 0.0
+    for i in range(A.shape[0]):
+        for j in range(A.shape[1]):
+            x = abs(A[i, j] - B[i, j])
+            if x > m:
+                m = x
+    return m
+
+
+@_jit
+def _max_abs(A):
+    m = 0.0
+    for i in range(A.shape[0]):
+        for j in range(A.shape[1]):
+            x = abs(A[i, j])
+            if x > m:
+                m = x
+    return m
+
+
+@_jit
+def _forward_info(y, Z, h, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt, tol, frz):
     """The filter in information form, for diagonal H (all models in this project).
 
     The covariance form factorises the n x n innovation covariance F_t each
@@ -256,22 +314,39 @@ def _forward_info(y, Z, h, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
     between two large numbers when some h_j are tiny (macro rows). Z' H^{-1} Z
     depends only on which series are observed, so it is recomputed only when
     that pattern changes from the previous month: in practice almost never.
+
+    **Steady state.** The covariance recursion does not involve the data. When
+    P_{t+1|t} agrees with P_{t|t-1} to `tol` (relative) under an unchanged
+    observation pattern, P is frozen: the inverses, log-determinants and
+    P_{t|t} of the last computed month are reused until the pattern changes.
+    Only the data-dependent part (innovations, state update, quadratic form)
+    is computed each month. frz[t] (if stored) is True when month t reused
+    the previous month's covariances, which are then bitwise identical; the
+    smoother uses this to reuse its gain. tol < 0 disables freezing.
     """
     N, n = y.shape
     k = T.shape[0]
     store = a_pred.shape[0] > 0
+    keep_frz = frz.shape[0] > 0
     hinv = 1.0 / h
     logh = np.log(h)
     a = a1.copy()
     P = P1.copy()
+    Pf = P1.copy()
+    Minv = np.eye(k)
+    logdet_P = 0.0
+    logdet_M = 0.0
     ll = 0.0
     ZHZ = np.zeros((k, k))
     sum_logh = 0.0
     mask = np.zeros(n, np.bool_)
     prev = np.zeros(n, np.bool_)
     have = False
+    frozen = False
     u = np.empty(k)
     v = np.empty(n)
+    da = np.empty(k)
+    tmp = np.empty(k)
     for t in range(N):
         if store:
             a_pred[t] = a
@@ -285,6 +360,9 @@ def _forward_info(y, Z, h, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
                 m += 1
             if ob != prev[j]:
                 same = False
+        if not same or m == 0:
+            frozen = False
+        skipped = frozen
         if m > 0:
             if not same:  # observation pattern changed: rebuild Z' H^-1 Z for it
                 ZHZ[:, :] = 0.0
@@ -309,13 +387,19 @@ def _forward_info(y, Z, h, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
                     w = hinv[j] * vj
                     for r in range(k):
                         u[r] += Z[j, r] * w
-            Pinv, logdet_P = _chol_inv_logdet(P)
-            if np.isnan(logdet_P):
-                return -np.inf
-            Minv, logdet_M = _chol_inv_logdet(Pinv + ZHZ)
-            if np.isnan(logdet_M):
-                return -np.inf
-            da = Minv @ u
+            if not frozen:
+                Pinv, logdet_P = _chol_inv_logdet(P)
+                if np.isnan(logdet_P):
+                    return -np.inf
+                Minv, logdet_M = _chol_inv_logdet(Pinv + ZHZ)
+                if np.isnan(logdet_M):
+                    return -np.inf
+                Pf = 0.5 * (Minv + Minv.T)
+            for r in range(k):
+                acc = 0.0
+                for s_ in range(k):
+                    acc += Minv[r, s_] * u[s_]
+                da[r] = acc
             quad = 0.0
             for j in range(n):
                 if mask[j]:
@@ -323,19 +407,33 @@ def _forward_info(y, Z, h, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
                     for r in range(k):
                         e -= Z[j, r] * da[r]
                     quad += hinv[j] * v[j] * e
-            a = a + da
-            P = 0.5 * (Minv + Minv.T)
+            for r in range(k):
+                a[r] += da[r]
             ll += -0.5 * (m * LOG_2PI + sum_logh + logdet_P + logdet_M + quad)
+        else:
+            Pf = P.copy()
         if store:
             a_filt[t] = a
-            P_filt[t] = P
-        a = c + T @ a
-        P = T @ P @ T.T + Q
+            P_filt[t] = Pf
+        if keep_frz:
+            frz[t] = skipped
+        for r in range(k):  # a <- c + T a, in place
+            acc = c[r]
+            for s_ in range(k):
+                acc += T[r, s_] * a[s_]
+            tmp[r] = acc
+        a[:] = tmp
+        if not frozen:
+            Pn = T @ Pf @ T.T + Q
+            if m > 0 and same and tol >= 0.0 and _max_abs_diff(Pn, P) <= tol * (1.0 + _max_abs(P)):
+                frozen = True  # converged: keep P (bitwise) from here while the pattern holds
+            else:
+                P = Pn
     return ll
 
 
 @_jit
-def _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
+def _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt, tol, frz):
     """Filter recursion: information form when H is diagonal, covariance form otherwise.
 
     Fills a_pred/P_pred/a_filt/P_filt in place (pass arrays with a zero
@@ -352,27 +450,40 @@ def _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt):
         hd = np.empty(n)
         for i in range(n):
             hd[i] = H[i, i]
-        return _forward_info(y, Z, hd, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt)
-    return _forward_dense(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt)
+        return _forward_info(y, Z, hd, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt, tol, frz)
+    return _forward_dense(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_filt, P_filt, frz)
 
 
 @_jit
-def _loglik_loop(y, Z, H, d, T, Q, c, a1, P1):
+def _loglik_loop(y, Z, H, d, T, Q, c, a1, P1, tol):
     k = T.shape[0]
     e1, e2 = np.empty((0, k)), np.empty((0, k, k))
-    return _forward(y, Z, H, d, T, Q, c, a1, P1, e1, e2, e1, e2)
+    return _forward(y, Z, H, d, T, Q, c, a1, P1, e1, e2, e1, e2, tol, np.empty(0, np.bool_))
 
 
 @_jit
-def _stats_loop(y, Z, H, d, T, Q, c, a1, P1):
-    """Filter, RTS smoother, and the sufficient statistics of the expected complete-data log-likelihood."""
+def _stats_loop(y, Z, H, d, T, Q, c, a1, P1, tol):
+    """Filter, RTS smoother, and the sufficient statistics of the expected complete-data log-likelihood.
+
+    Steady-state shortcuts (exact up to `tol`, see `_forward_info`):
+
+    - the smoother gain J_t = P_{t|t} T' P_{t+1|t}^{-1} depends only on the
+      covariances, so it is reused (no linear solve) across months the filter
+      marked as frozen;
+    - with J fixed, the smoothed covariance recursion is a contraction; once
+      P_{t|T} stops changing it is copied instead of recomputed;
+    - each series' sum of E[x x'] over the months it is observed is the sum
+      over all months minus the months it is missing (rare), instead of one
+      k x k accumulation per series per month: O(N k^2) instead of O(N n k^2).
+    """
     N, n = y.shape
     k = T.shape[0]
     a_pred = np.empty((N, k))
     P_pred = np.empty((N, k, k))
     a_s = np.empty((N, k))
     P_s = np.empty((N, k, k))
-    ll = _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_s, P_s)
+    frz = np.zeros(N, np.bool_)
+    ll = _forward(y, Z, H, d, T, Q, c, a1, P1, a_pred, P_pred, a_s, P_s, tol, frz)
 
     n_i = np.zeros(n)
     syy = np.zeros(n)
@@ -385,36 +496,96 @@ def _stats_loop(y, Z, H, d, T, Q, c, a1, P1):
         return ll, n_i, syy, sya, sxx, S11, S10, S00, a_s, P_s
 
     # Backward pass (a_s, P_s hold the filtered values on entry). C[t] = Cov(x_{t+1}, x_t | all data).
+    # Small fixed-size algebra is written as loops into preallocated buffers: on
+    # k <= 6 matrices, allocating a temporary costs more than the arithmetic.
     C = np.zeros((N, k, k))
+    J = np.zeros((k, k))
+    D = np.empty((k, k))
+    DJ = np.empty((k, k))
+    da = np.empty(k)
+    ps_frozen = False
     for t in range(N - 2, -1, -1):
-        J = np.linalg.solve(P_pred[t + 1], T @ P_s[t]).T  # P_{t|t} T' P_{t+1|t}^{-1}
-        a_s[t] = a_s[t] + J @ (a_s[t + 1] - a_pred[t + 1])
-        P_s[t] = P_s[t] + J @ (P_s[t + 1] - P_pred[t + 1]) @ J.T
-        P_s[t] = 0.5 * (P_s[t] + P_s[t].T)
-        C[t] = P_s[t + 1] @ J.T
+        # J_t equals J_{t+1} when P_{t|t} = P_{t+1|t+1} and P_{t+1|t} = P_{t+2|t+1}, i.e. months t+1 and t+2 frozen.
+        reuse = tol >= 0.0 and t <= N - 3 and frz[t + 1] and frz[t + 2]
+        if not reuse:
+            J = np.linalg.solve(P_pred[t + 1], T @ P_s[t]).T  # P_{t|t} T' P_{t+1|t}^{-1}
+            J = np.ascontiguousarray(J)
+            ps_frozen = False
+        for r in range(k):  # a_s[t] += J (a_s[t+1] - a_pred[t+1])
+            da[r] = a_s[t + 1, r] - a_pred[t + 1, r]
+        for r in range(k):
+            acc = 0.0
+            for q in range(k):
+                acc += J[r, q] * da[q]
+            a_s[t, r] += acc
+        if ps_frozen:
+            P_s[t] = P_s[t + 1]
+        else:
+            for r in range(k):  # P_s[t] += J (P_s[t+1] - P_pred[t+1]) J'
+                for q in range(k):
+                    D[r, q] = P_s[t + 1, r, q] - P_pred[t + 1, r, q]
+            for r in range(k):
+                for q in range(k):
+                    acc = 0.0
+                    for w in range(k):
+                        acc += D[r, w] * J[q, w]
+                    DJ[r, q] = acc
+            for r in range(k):
+                for q in range(r + 1):
+                    acc = 0.0
+                    for w in range(k):
+                        acc += J[r, w] * DJ[w, q]
+                    # symmetrise: average the (r, q) and (q, r) entries of P_filt + J D J'
+                    val = 0.5 * (P_s[t, r, q] + P_s[t, q, r]) + acc
+                    P_s[t, r, q] = val
+                    P_s[t, q, r] = val
+            if reuse and _max_abs_diff(P_s[t], P_s[t + 1]) <= tol * (1.0 + _max_abs(P_s[t + 1])):
+                ps_frozen = True
+        for r in range(k):  # C[t] = P_s[t+1] J'
+            for q in range(k):
+                acc = 0.0
+                for w in range(k):
+                    acc += P_s[t + 1, r, w] * J[q, w]
+                C[t, r, q] = acc
 
+    Sxx = np.zeros((k, k))  # sum over all months of E[x_t x_t']
+    miss = np.zeros((n, k, k))  # per series: the same sum over months it is missing
     for t in range(N):
-        Exx = np.outer(a_s[t], a_s[t]) + P_s[t]
+        for r in range(k):
+            ar = a_s[t, r]
+            for q in range(k):
+                Sxx[r, q] += ar * a_s[t, q] + P_s[t, r, q]
         for j in range(n):
             if np.isfinite(y[t, j]):
                 yj = y[t, j] - d[j]
                 n_i[j] += 1.0
                 syy[j] += yj * yj
-                sya[j] += yj * a_s[t]
-                sxx[j] += Exx
+                for r in range(k):
+                    sya[j, r] += yj * a_s[t, r]
+            else:
+                for r in range(k):
+                    for q in range(k):
+                        miss[j, r, q] += a_s[t, r] * a_s[t, q] + P_s[t, r, q]
         if t >= 1:  # transition pairs (x_t, x_{t-1}); regressor z = (1, x_{t-1})
-            S11 += Exx
-            S10[:, 0] += a_s[t]
-            S10[:, 1:] += np.outer(a_s[t], a_s[t - 1]) + C[t - 1]
+            for r in range(k):
+                S10[r, 0] += a_s[t, r]
+                for q in range(k):
+                    S10[r, 1 + q] += a_s[t, r] * a_s[t - 1, q] + C[t - 1, r, q]
         if t <= N - 2:
-            S00[0, 0] += 1.0
-            S00[0, 1:] += a_s[t]
-            S00[1:, 0] += a_s[t]
-            S00[1:, 1:] += Exx
+            for r in range(k):
+                S00[0, 1 + r] += a_s[t, r]
+    for j in range(n):
+        sxx[j] = Sxx - miss[j]
+    Exx0 = np.outer(a_s[0], a_s[0]) + P_s[0]
+    ExxN = np.outer(a_s[N - 1], a_s[N - 1]) + P_s[N - 1]
+    S11[:, :] = Sxx - Exx0
+    S00[0, 0] = N - 1.0
+    S00[1:, 0] = S00[0, 1:]
+    S00[1:, 1:] = Sxx - ExxN
     return ll, n_i, syy, sya, sxx, S11, S10, S00, a_s, P_s
 
 
-def kalman_loglik(model: StateSpace, y) -> float:
+def kalman_loglik(model: StateSpace, y, tol: float = STEADY_TOL) -> float:
     """Log-likelihood of y under `model`; identical to kalman_filter(...).loglik but much faster.
 
     Returns -inf (instead of raising) when the parameters make F_t singular.
@@ -427,7 +598,7 @@ def kalman_loglik(model: StateSpace, y) -> float:
             return -np.inf
     f = lambda x: np.ascontiguousarray(x, dtype=float)
     return float(_loglik_loop(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q),
-                              f(model.c), f(model.a1), f(model.P1)))
+                              f(model.c), f(model.a1), f(model.P1), tol))
 
 
 @dataclass
@@ -465,7 +636,7 @@ class SmootherStats:
         return int(round(self.S00[0, 0]))
 
 
-def smoothed_stats(model: StateSpace, y) -> SmootherStats:
+def smoothed_stats(model: StateSpace, y, tol: float = STEADY_TOL) -> SmootherStats:
     """One compiled filter + RTS smoother pass returning the log-likelihood and sufficient statistics.
 
     Assumes H is diagonal for the measurement statistics (as in DNS), so each
@@ -476,11 +647,11 @@ def smoothed_stats(model: StateSpace, y) -> SmootherStats:
     y = np.atleast_2d(np.asarray(y, dtype=float))
     f = lambda x: np.ascontiguousarray(x, dtype=float)
     out = _stats_loop(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q),
-                      f(model.c), f(model.a1), f(model.P1))
+                      f(model.c), f(model.a1), f(model.P1), tol)
     return SmootherStats(float(out[0]), *out[1:])
 
 
-def filtered_states(model: StateSpace, y) -> np.ndarray:
+def filtered_states(model: StateSpace, y, tol: float = STEADY_TOL) -> np.ndarray:
     """a_{t|t} for every t, from the compiled filter (same numbers as `kalman_filter(...).a_filt`).
 
     Used by the backtests, which need many filter passes but only the filtered
@@ -492,7 +663,7 @@ def filtered_states(model: StateSpace, y) -> np.ndarray:
     a_pred, P_pred = np.empty((N, k)), np.empty((N, k, k))
     a_filt, P_filt = np.empty((N, k)), np.empty((N, k, k))
     ll = _forward(f(y), f(model.Z), f(model.H), f(model.d), f(model.T), f(model.Q), f(model.c),
-                  f(model.a1), f(model.P1), a_pred, P_pred, a_filt, P_filt)
+                  f(model.a1), f(model.P1), a_pred, P_pred, a_filt, P_filt, tol, np.empty(0, np.bool_))
     if not np.isfinite(ll):
         raise np.linalg.LinAlgError("filter failed: covariance not positive definite")
     return a_filt
