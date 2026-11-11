@@ -77,20 +77,21 @@ Notes:
 
 ## 2. Project status
 
-As of 10 Nov 2026:
+As of 11 Nov 2026:
 
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 55 tests (parsers, DNS, backtest, Kalman filter vs statsmodels and brute force, EM, exact score), all passing (`pytest -q`) |
+| Offline tests | **Done.** 102 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, EM, exact score, shrinkage, DM/CW, impulse responses vs statsmodels), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
 | Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; ~20 ms per likelihood on USD 1985– |
 | One-step maximum-likelihood DNS (yields only) | **Done** (`statespace_dns.py`, `notebooks/02_kalman_usd.ipynb`). EM + exact score, 1 bp noise floor, multistart; full USD backtest ~1 min from scratch (both λ variants), seconds from cache |
-| Forward-rate and survey benchmarks, trading evaluation | Planned (§7.4, §7.5) |
-| Yields + macro model (Diebold–Rudebusch–Aruoba 2006) | Not started |
-| Rolling out-of-sample forecasts, benchmarks, tests | Not started |
+| Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
+| Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
+| EUR and GBP | Not started (§8, step 7) |
+| Trading evaluation | Not started (§7.5; last) |
 | Cross-currency comparison and write-up | Not started |
 
 Latest verified coverage (month-end, output of `python -m yck fetch`):
@@ -146,17 +147,20 @@ only a few bp (RMSE ratios ≤ 0.03), so the conclusion is robust.
 ```
 config/data_sources.yaml    every series ID, URL and setting; fix broken IDs here, not in code
 src/yck/
-  __main__.py               CLI: `python -m yck fetch | probe-ecb`; loads .env
+  __main__.py               CLI: `python -m yck fetch | probe-ecb | backtest`; loads .env
   data/http.py              requests session, retries, on-disk cache in data/raw
   data/sources.py           one parse_* (pure, unit-tested) + fetch_* per source; ECB probes; ALFRED as_of()
   data/curves.py            Svensson/Nelson-Siegel evaluation, month-end sampling
   data/build.py             orchestrates everything and writes data/processed + coverage.md
+  data/realtime.py          real-time macro panels: ALFRED vintages (USD) or release lags, as known at each origin
   model/dns.py              Nelson-Siegel loadings, two-step Diebold-Li estimation, factor dynamics, forecasts
   model/kalman.py           Kalman filter (missing rows), log-likelihood, RTS smoother, smoother sufficient statistics (compiled)
-  model/statespace_dns.py   ML DNS: parameter transforms, EM, exact score, multistart L-BFGS-B, 1 bp noise floor
-  eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, RMSE tables
+  model/statespace_dns.py   ML DNS (yields only or yields + macro): transforms, EM, exact score, multistart L-BFGS-B, 1 bp floor, shrinkage prior
+  model/irf.py              impulse responses (Cholesky, generalised), variance decompositions, bands from the observed information
+  eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, forwards, RMSE tables
+  eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, ratio/significance tables
 notebooks/                  analysis notebooks, committed with outputs
-tests/                      offline tests: parsers (small samples in each source's real format), DNS, backtest
+tests/                      offline tests: parsers (small samples in each source's real format), real-time panels, DNS, Kalman, backtest, stats, IRFs
 .github/workflows/
   ci.yml                    pytest on every push / PR
   fetch-data.yml            full fetch on a GitHub runner (manual + monthly cron); coverage report in the log
@@ -392,6 +396,16 @@ rectangular estimator with the HLN correction rejects 5.5–6.5%
   approximates what was known at the time; state it clearly as a
   limitation.
 - `FEDFUNDS`, the ECB DFR and Bank Rate are known at month-end (lag 0).
+- **Withdrawn history.** Around BEA comprehensive revisions ALFRED records
+  most of the PCE price index as missing until it is republished on the new
+  basis (23 Dec 2003 – 4 Jan 2004, and 4 Aug 2009). Taken literally, the
+  2003-12 origin would have no inflation data at all. The panel uses the last
+  complete vintage instead (`realtime.as_of_complete`), which is what a
+  forecaster then actually had.
+- **Size of revisions (USD, 2000–2026, latest known value at each origin vs
+  today's vintage):** capacity utilisation mean |revision| 0.98 pp (max
+  2.8 pp, about a quarter of its standard deviation); core PCE inflation
+  0.18 pp.
 
 ### 7.4 Market and survey benchmarks
 
@@ -437,8 +451,8 @@ instead ask whether it beats **what the market already prices**.
   the macro model (§6.4) the real test.
 - **Yields + macro, first results (USD, real-time macro).** The full DRA
   model (6 states, 80 parameters; Kalman, λ fixed) is *worse* than
-  yields-only: RMSE ratio to RW at h = 12 is 1.00 / 1.10 / 1.18 / 1.29 /
-  1.25 (3m / 12m / 24m / 5y / 10y), significantly worse than RW at 2y+.
+  yields-only: RMSE ratio to RW at h = 12 is 1.00 / 1.10 / 1.19 / 1.29 /
+  1.26 (3m / 12m / 24m / 5y / 10y), significantly worse than RW at 2y+.
   Clark–West finds no gain from macro at h = 12, only faint short-end
   signal at h = 1 and 6 (p 0.02–0.10). The likely cause is overfitting:
   36 VAR coefficients, most weakly identified. A *parsimonious* version
@@ -455,7 +469,7 @@ instead ask whether it beats **what the market already prices**.
   |---|---|---|---|---|---|
   | Policy rate only, h = 6 | 0.95 (0.01) | 0.97 (0.01) | 0.99 (0.06) | 1.00 | 1.02 |
   | Policy rate only, h = 12 | 0.96 (0.03) | 0.98 (0.10) | 0.99 | 0.99 | 0.98 (0.04) |
-  | All 3, shrunk τ = 0.01, h = 12 | 1.01 | 0.99 | 0.98 (0.10) | 0.96 (0.09) | 0.97 (0.10) |
+  | All 3, shrunk τ = 0.01, h = 12 | 1.01 | 0.99 | 0.98 | 0.96 (< 0.10) | 0.97 (< 0.10) |
   | All 3, shrunk τ = 0.1, h = 12 | 1.15 | 1.15 | 1.15 | 1.12 | 1.15 |
   | All 3, unrestricted, h = 12 | 1.09 | 1.10 | 1.11 | 1.09 | 1.10 |
 
@@ -468,6 +482,24 @@ instead ask whether it beats **what the market already prices**.
   reported, and no τ beats the policy-rate model, so the choice of τ involves
   no data snooping. **No model beats forwards significantly.** The best
   (policy rate only) is level with them: RMSE ratio 0.98–1.04 at h = 6, 12.
+  (Numbers from the backtest rerun of 11 Nov 2026, after the PCE vintage fix
+  in §7.3; changes from the first run are ≤ 0.01.)
+- **Why so little? Impulse responses and variance decompositions** (USD
+  1985–2026, latest vintage, `notebooks/03_macro_usd.ipynb`; Cholesky order
+  capacity utilisation, inflation, fed funds, level, slope, curvature; 90%
+  bands from the MLE's asymptotic distribution). As in DRA (2006), the
+  curve leads the macro economy more than the reverse. Curve shocks explain
+  about three quarters of the fed funds rate's 12-month forecast variance
+  (curvature alone half). A slope shock (short rates up relative to long)
+  lowers inflation by about 10 bp over 6–24 months. In the other direction,
+  macro shocks explain only 1–11% of the factors' forecast variance at
+  1–12 months (13–33% at 5 years). An inflation shock lifts the level by
+  about 5 bp, and activity and policy shocks move mostly the short end. So
+  at forecasting horizons, what the curve does not already contain is mostly
+  the policy rate, which matches the out-of-sample result. Generalised
+  (order-free) responses agree on these links. A generalised fed funds shock
+  raises activity and inflation, because it includes the macro news the Fed
+  reacts to, which is why a recursive identification is needed.
 - **Surveys (USD, optional).** Philadelphia Fed Survey of Professional
   Forecasters: quarterly 3m T-bill and 10y Treasury forecasts (free).
 - Test every model against each benchmark with Diebold–Mariano (§7.2).
@@ -570,14 +602,15 @@ premium), and that is the bar a model must clear.
    data pipeline and forward benchmark (§7.4), optional SPF survey,
    Diebold–Mariano and Clark–West tests (§7.2), results tables (CSV +
    markdown).
-6. 🔶 **Yields + macro (§6.4).** Done: real-time macro panels
+6. ✅ **Yields + macro (§6.4).** Done: real-time macro panels
    (`data/realtime.py`), the DRA state-space model (any number of macro
    states, analytic score), real-time backtest (`python -m yck backtest
    --macro`), policy-rate-only variant (`--macro-vars`), shrinkage prior on
    all factor–macro links (`--shrink`). Results (§7.4): only the policy rate
    helps (short end); the full model overfits; shrinkage does not rescue
-   capacity utilisation or inflation. Remaining: impulse responses and
-   `notebooks/03_macro_usd.ipynb`. Original plan: real-time macro panels first (§7.3: ALFRED
+   capacity utilisation or inflation. Impulse responses, variance
+   decompositions and parameter-uncertainty bands (`model/irf.py`) and
+   `notebooks/03_macro_usd.ipynb` complete the step. Original plan: real-time macro panels first (§7.3: ALFRED
    vintages for USD, release lags for EUR/GBP, unreleased months as missing
    observations). Then the 6-state DRA model with macro observed without
    error, with EM and the exact score extended to it, impulse responses and
