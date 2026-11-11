@@ -110,8 +110,34 @@ def _fetch_macro_series(spec: dict, name: str, raw: Path, refresh: bool) -> pd.S
     raise ValueError(f"unknown macro source {s}")
 
 
-def to_monthly(s: pd.Series, transform: str) -> pd.Series:
-    m = month_end(s.dropna().to_frame()).iloc[:, 0]
+def to_monthly(s: pd.Series, transform: str, today: pd.Timestamp | None = None) -> pd.Series:
+    """Month-end series (last observation of each month), optionally as % change on 12 months earlier.
+
+    Fast path for data that are already one observation per month (FRED,
+    ALFRED, ECB, ONS monthly series): month-ends come from numpy month
+    arithmetic and the y/y change from a 12-month array shift. The generic path
+    (`month_end` + `asfreq`) groups by month and rebuilds a calendar in pure
+    Python, which made real-time panels (hundreds of vintages) slow. Both give
+    identical output (tested). As in `month_end`, the unfinished current
+    calendar month is dropped.
+    """
+    s = s.dropna()
+    months = s.index.values.astype("datetime64[M]")
+    if len(months) > 1 and bool(np.all(np.diff(months).astype(np.int64) > 0)):
+        current = np.datetime64((today or pd.Timestamp.today()).to_period("M").start_time, "M")
+        keep = months < current
+        months, vals = months[keep], s.to_numpy(float)[keep]
+        if transform == "yoy" and len(months):
+            full = np.arange(months[0], months[-1] + np.timedelta64(1, "M"))
+            arr = np.full(full.size, np.nan)
+            arr[(months - months[0]).astype(np.int64)] = vals
+            prev = np.full(full.size, np.nan)
+            prev[12:] = arr[:-12]
+            months, vals = full, 100 * (arr / prev - 1)
+        unit = getattr(s.index, "unit", "ns")  # keep the input's resolution, as the generic path does
+        ends = ((months + np.timedelta64(1, "M")).astype("datetime64[D]") - np.timedelta64(1, "D")).astype(f"datetime64[{unit}]")
+        return pd.Series(vals, index=pd.DatetimeIndex(ends, name="date"), name=s.name if s.name is not None else 0)
+    m = month_end(s.to_frame(), today).iloc[:, 0]
     if transform == "yoy":
         m = m.asfreq("ME")
         m = 100 * (m / m.shift(12) - 1)

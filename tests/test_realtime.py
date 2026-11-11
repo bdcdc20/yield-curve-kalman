@@ -111,3 +111,39 @@ def test_repeated_origins_are_memoised_and_safe_to_modify():
     again = rt.at("2001-03-31")
     assert len(rt._memo) == 1 and (again != -999.0).all().all()
     assert again.loc["2001-02-28", "real_activity"] == 80.0 + 13
+
+
+def test_vintage_table_matches_as_of_complete_including_withdrawn_history():
+    from yck.data.realtime import VintageTable, as_of_complete
+
+    v = _vintages()
+    gap_start, gap_end = pd.Timestamp("2001-04-20"), pd.Timestamp("2001-05-05")
+    live = (v["realtime_start"] <= gap_start) & (v["realtime_end"] >= gap_start)
+    w = v[(v["series_id"] == "PCEPI") & live].copy()
+    v.loc[w.index, "realtime_end"] = gap_start - pd.Timedelta(days=1)
+    v = pd.concat([v, w.assign(realtime_start=gap_start, realtime_end=gap_end, value=np.nan),
+                   w.assign(realtime_start=gap_end + pd.Timedelta(days=1))], ignore_index=True)
+    for sid in ("TCU", "PCEPI"):
+        sub = v[v["series_id"] == sid]
+        table = VintageTable(sub)
+        for d in pd.date_range("2000-02-01", "2002-01-31", freq="7D"):
+            pd.testing.assert_series_equal(table.as_of_complete(d), as_of_complete(sub, d))
+
+
+@pytest.mark.parametrize("transform", ["level", "yoy"])
+def test_fast_monthly_conversion_matches_the_generic_path(transform):
+    from yck.data.build import to_monthly
+    from yck.data.curves import month_end
+
+    today = pd.Timestamp("2026-11-11")
+    rng = np.random.default_rng(1)
+    idx = pd.date_range("1998-01-01", "2026-11-01", freq="MS")  # first-of-month, includes the current month
+    s = pd.Series(100 + rng.normal(size=len(idx)).cumsum(), index=idx, name="x")
+    s.iloc[[5, 40, 41]] = np.nan  # gaps
+    fast = to_monthly(s, transform, today=today)
+    m = month_end(s.dropna().to_frame(), today).iloc[:, 0]
+    if transform == "yoy":
+        m = m.asfreq("ME")
+        m = 100 * (m / m.shift(12) - 1)
+    pd.testing.assert_series_equal(fast, m, check_freq=False)
+    assert fast.index[-1] == pd.Timestamp("2026-10-31")  # unfinished current month dropped

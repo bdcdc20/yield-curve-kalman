@@ -196,22 +196,51 @@ def irf_draws(fit: DNSFit, data: pd.DataFrame, horizon: int = 60, order=None, ki
     whose A is explosive are discarded, which conditions on stationarity.
     """
     p = fit.params
-    n, k = len(fit.yield_columns), p.k
+    k = p.k
     idx = resolve_order(fit.state_names, order)
     info = info or observed_information(fit, data, h_floor_bp)
     point = impulse_responses(p.A, p.Q, horizon, idx, kind)
     rng = np.random.default_rng(seed)
     C = np.linalg.cholesky(info.cov)
-    out, rejected = [], 0
-    for _ in range(n_draws):
-        th = info.theta.copy()
-        th[info.free] += C @ rng.standard_normal(C.shape[0])
-        q = DNSParams.from_vector(th, n, fit.estimate_lambda, p.lam, k)
-        if np.max(np.abs(np.linalg.eigvals(q.A))) >= 1.0:
-            rejected += 1
-            continue
-        out.append(impulse_responses(q.A, q.Q, horizon, idx, kind))
-    return IRFDraws(point=point, draws=np.array(out), n_rejected=rejected, info=info)
+    # All draws at once (stacks of k x k matrices) instead of a Python loop per draw.
+    # Row i of the (n_draws, m) normal matrix is exactly what draw i got in the loop version.
+    th = np.tile(info.theta, (n_draws, 1))
+    th[:, info.free] += rng.standard_normal((n_draws, C.shape[0])) @ C.T
+    A, Q = _draw_A_Q(th, k)
+    stable = np.max(np.abs(np.linalg.eigvals(A)), axis=1) < 1.0
+    return IRFDraws(point=point, draws=_batched_responses(A[stable], Q[stable], horizon, idx, kind),
+                    n_rejected=int((~stable).sum()), info=info)
+
+
+def _draw_A_Q(th: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """A and Q for a stack of parameter vectors (same transforms as `DNSParams.from_vector`)."""
+    A = th[:, k:k + k * k].reshape(-1, k, k)
+    rows, cols = np.tril_indices(k)
+    o = k + k * k
+    l = th[:, o:o + rows.size].copy()
+    diag = rows == cols
+    l[:, diag] = np.exp(l[:, diag])
+    L = np.zeros((th.shape[0], k, k))
+    L[:, rows, cols] = l
+    return A, L @ L.transpose(0, 2, 1)
+
+
+def _batched_responses(A: np.ndarray, Q: np.ndarray, horizon: int, order, kind: str) -> np.ndarray:
+    """`impulse_responses` for a stack of (A, Q): shape (draws, horizon + 1, k, k)."""
+    nd, k = A.shape[0], A.shape[1]
+    if kind == "cholesky":
+        o = np.asarray(order)
+        B = np.zeros_like(Q)
+        B[np.ix_(np.arange(nd), o, o)] = np.linalg.cholesky(Q[:, o][:, :, o])
+    elif kind == "generalized":
+        B = Q / np.sqrt(np.diagonal(Q, axis1=1, axis2=2))[:, None, :]
+    else:
+        raise ValueError(f"kind must be 'cholesky' or 'generalized', not {kind!r}")
+    out = np.empty((nd, horizon + 1, k, k))
+    out[:, 0] = B
+    for h in range(1, horizon + 1):
+        out[:, h] = A @ out[:, h - 1]  # A^h B
+    return out
 
 
 def irf_frame(responses: np.ndarray, names, shock: str) -> pd.DataFrame:

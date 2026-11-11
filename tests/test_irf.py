@@ -130,3 +130,27 @@ def test_fixed_mu_is_excluded_from_the_information(dra):
     info = observed_information(fit, data, h_floor_bp=None)
     k = fit.params.k
     assert fit.mu_fixed and not info.free[:k].any() and info.free[k:].all()
+
+
+@pytest.mark.parametrize("kind", ["cholesky", "generalized"])
+def test_batched_draws_match_the_per_draw_loop(dra, kind):
+    from yck.model.statespace_dns import DNSParams
+
+    data, _, fit = dra
+    order = ["real_activity", "inflation", "level", "slope", "curvature"]
+    d = irf_draws(fit, data, horizon=24, order=order, kind=kind, n_draws=200, seed=3, h_floor_bp=None)
+    # reference: the original loop, draw by draw from the same random stream
+    rng = np.random.default_rng(3)
+    C = np.linalg.cholesky(d.info.cov)
+    idx = resolve_order(fit.state_names, order)
+    ref, rejected = [], 0
+    for _ in range(200):
+        th = d.info.theta.copy()
+        th[d.info.free] += C @ rng.standard_normal(C.shape[0])
+        q = DNSParams.from_vector(th, len(fit.yield_columns), k=fit.params.k)
+        if np.max(np.abs(np.linalg.eigvals(q.A))) >= 1.0:
+            rejected += 1
+            continue
+        ref.append(impulse_responses(q.A, q.Q, 24, idx, kind))
+    assert d.n_rejected == rejected
+    np.testing.assert_allclose(d.draws, np.array(ref), rtol=1e-10, atol=1e-12)

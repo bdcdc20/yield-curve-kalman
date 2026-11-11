@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -52,6 +53,33 @@ def as_of_complete(vintages: pd.DataFrame, asof) -> pd.Series:
         d = gaps["realtime_start"].min() - pd.Timedelta(days=1)
 
 
+class VintageTable:
+    """One series' ALFRED vintage table, preprocessed once for fast `as_of_complete` lookups.
+
+    Same result as `as_of_complete(vintages, asof)`, but the table is turned into
+    numpy arrays sorted by reference date at construction, so each lookup is two
+    vectorised comparisons instead of filtering, re-indexing and sorting a
+    DataFrame (hundreds of lookups per backtest).
+    """
+
+    def __init__(self, vintages: pd.DataFrame):
+        v = vintages.sort_values(["date", "realtime_start"], kind="stable")
+        self.first = v["realtime_start"].min()
+        self.date = v["date"].to_numpy()
+        self.start = v["realtime_start"].to_numpy()
+        self.end = v["realtime_end"].to_numpy()
+        self.value = v["value"].to_numpy(float)
+
+    def as_of_complete(self, asof) -> pd.Series:
+        d = np.datetime64(pd.Timestamp(asof), "ns")
+        while True:
+            live = (self.start <= d) & (self.end >= d)
+            gaps = live & np.isnan(self.value)
+            if not gaps.any():
+                return pd.Series(self.value[live], index=pd.DatetimeIndex(self.date[live], name="date"), name="value")
+            d = self.start[gaps].min() - np.timedelta64(1, "D")
+
+
 class RealTimeMacro:
     """Macro panel for one currency as known at any origin: `rt.at(origin)`."""
 
@@ -72,6 +100,7 @@ class RealTimeMacro:
                     v = vintages[vintages["series_id"] == spec["id"]]
                     if not v.empty:
                         self.vintages[var] = v
+        self._tables = {var: VintageTable(v) for var, v in self.vintages.items()}
 
     @classmethod
     def load(cls, ccy: str, data_dir: Path, config_path: Path, variables=VARIABLES) -> "RealTimeMacro":
@@ -87,14 +116,12 @@ class RealTimeMacro:
         return self.latest[var].loc[:last_known]
 
     def _from_vintage(self, var: str, origin: pd.Timestamp) -> pd.Series:
-        v = self.vintages[var]
-        first = v["realtime_start"].min()
+        table = self._tables[var]
         transform = self.specs[var].get("transform", "level")
-        if origin < first:
-            raw = as_of_complete(v, first)
-            s = to_monthly(raw, transform)
+        if origin < table.first:
+            s = to_monthly(table.as_of_complete(table.first), transform)
             return s.loc[: origin - pd.offsets.MonthEnd(self.release_lag.get(var, 0))]
-        return to_monthly(as_of_complete(v, origin), transform).loc[:origin]
+        return to_monthly(table.as_of_complete(origin), transform).loc[:origin]
 
     def at(self, origin, index: pd.DatetimeIndex | None = None) -> pd.DataFrame:
         """Macro panel as known at month-end `origin`, reindexed to `index` (NaN = not yet known)."""
