@@ -53,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--accuracy", action="store_true",
                    help="the step 7b grid for every --ccy: yields only and policy rate only, each with every "
                         "shifting endpoint and AR(1) measurement-error model (README 7.6)")
+    b.add_argument("--anchor", action="store_true",
+                   help="step 7b item 4: yields only and policy rate only (plain and AR(1) errors), tilted to "
+                        "the forward curve at 3m-12m")
     b.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
     b.add_argument("--data-dir", type=Path, default=ROOT / "data")
     a = p.parse_args(argv)
@@ -79,9 +82,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _backtest(a) -> int:
-    from .eval.grid import STANDARD_GRID, accuracy_grid, run_grid
+    from .eval.grid import STANDARD_GRID, accuracy_grid, anchor_grid, run_grid
 
-    if a.accuracy:
+    if a.anchor:
+        grid = anchor_grid
+    elif a.accuracy:
         grid = accuracy_grid
     elif a.all:
         grid = STANDARD_GRID

@@ -20,7 +20,9 @@ import pandas as pd
 import yaml
 
 from yck.data.realtime import RealTimeMacro
-from yck.eval.backtest import dns_kalman_forecasts, prefit
+from yck.eval.backtest import (dns_kalman_forecasts, dns_two_step_forecasts, forward_forecasts, prefit,
+                               random_walk_forecasts)
+from yck.eval.combine import combine
 from yck.model.adjust import ewma_endpoint, survey_endpoint
 
 # USD forecasts from 2000 (ALFRED vintages); EUR and GBP from 2010, so EUR has at
@@ -42,17 +44,30 @@ ERROR_MODELS = (None, "ar1", "ar1c")
 
 
 def accuracy_grid(ccy: str) -> list[tuple]:
-    """Step 7b grid for one currency: (macro vars, lambda mode, tau, endpoint, error model) tuples."""
+    """Step 7b items 1-2 for one currency: (macro vars, lambda mode, tau, endpoint, error model) tuples."""
     return [(m, "fixed", None, e, err) for m in ACCURACY_MODELS for e in ENDPOINTS[ccy] for err in ERROR_MODELS]
 
 
-def run_tag(mvars, lam_mode: str, tau, floor=1.0, endpoint=None, error_ar=None) -> str:
+# Step 7b items 3-4, fixed before they were run (README section 8).
+def anchor_grid(ccy: str) -> list[tuple]:
+    """Item 4: the two models, plain and with AR(1) errors, tilted to the forwards at 3m-12m."""
+    return [(m, "fixed", None, None, err, "fwd") for m in ACCURACY_MODELS for err in (None, "ar1")]
+
+
+COMBINATION_SETS = {  # item 3: which forecasts are averaged
+    "A": ("yields + AR(1)", "two-step VAR(1)", "forwards", "random walk"),
+    "B": ("yields + AR(1)", "policy rate + AR(1)", "two-step VAR(1)", "forwards", "random walk"),
+}
+COMBINATION_WEIGHTS = ("equal", "inv_mse")
+
+
+def run_tag(mvars, lam_mode: str, tau, floor=1.0, endpoint=None, error_ar=None, anchor=None) -> str:
     """File tag of one backtest, e.g. 'macro-policy_rate_ep-ewma_lamfixed_err-ar1c'
-    (fc_{CCY}_kalman_{tag}_h{h}.parquet). Without an endpoint or error model the tags are those of step 7."""
+    (fc_{CCY}_kalman_{tag}_h{h}.parquet). Without an endpoint, error model or anchor the tags are those of step 7."""
     mtag = "" if mvars is None else ("macro_" if len(mvars) == 3 else "macro-" + "+".join(mvars) + "_")
     return (mtag + (f"shrink{tau:g}_" if tau is not None else "") + (f"ep-{endpoint}_" if endpoint else "")
             + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
-            + (f"_err-{error_ar}" if error_ar else ""))
+            + (f"_err-{error_ar}" if error_ar else "") + (f"_anc-{anchor}" if anchor else ""))
 
 
 def load_endpoint(name: str, ccy: str, yields: pd.DataFrame, data_dir: Path, config: Path) -> pd.Series:
@@ -65,9 +80,10 @@ def load_endpoint(name: str, ccy: str, yields: pd.DataFrame, data_dir: Path, con
 
 
 def _grid_for(grid, ccy: str) -> list[tuple]:
-    """Grid entries as 5-tuples; `grid` is a list of 3- or 5-tuples, or a function of the currency."""
+    """Grid entries as 6-tuples (macro vars, lambda mode, tau, endpoint, error model, anchor); `grid` is a list
+    of 3- to 6-tuples, or a function of the currency."""
     rows = grid(ccy) if callable(grid) else grid
-    return [tuple(r) + (None,) * (5 - len(r)) for r in rows]
+    return [tuple(r) + (None,) * (6 - len(r)) for r in rows]
 
 
 def plan_runs(ccys, data_dir: Path, config: Path, grid=STANDARD_GRID, est_start=None, first_origin=None,
@@ -79,15 +95,19 @@ def plan_runs(ccys, data_dir: Path, config: Path, grid=STANDARD_GRID, est_start=
         es, fo = est_start or start_default, first_origin or origin_default
         y = pd.read_parquet(Path(data_dir) / "processed" / f"curves_{ccy}.parquet")
         macros, endpoints = {}, {}  # built once per currency, shared by the variants (macro panels memoised)
-        for mvars, lam_mode, tau, ep, err in _grid_for(grid, ccy):
+        ext = None
+        for mvars, lam_mode, tau, ep, err, anc in _grid_for(grid, ccy):
             if mvars is not None and mvars not in macros:
                 macros[mvars] = RealTimeMacro.load(ccy, data_dir, config, mvars)
             if ep is not None and ep not in endpoints:
                 endpoints[ep] = load_endpoint(ep, ccy, y, data_dir, config)
-            runs.append((ccy, run_tag(mvars, lam_mode, tau, floor, ep, err),
+            if anc is not None and ext is None:
+                ext = pd.read_parquet(Path(data_dir) / "processed" / f"curves_ext_{ccy}.parquet")
+            runs.append((ccy, run_tag(mvars, lam_mode, tau, floor, ep, err, anc),
                          dict(yields=y, est_start=es, first_origin=fo, reestimate_every=every,
                               estimate_lambda=lam_mode == "est", h_floor_bp=floor, n_starts=starts,
-                              macro=macros.get(mvars), shrink_tau=tau, endpoint=endpoints.get(ep), error_ar=err)))
+                              macro=macros.get(mvars), shrink_tau=tau, endpoint=endpoints.get(ep), error_ar=err,
+                              anchor=ext if anc == "fwd" else None)))
     return runs
 
 
@@ -125,7 +145,37 @@ def ensure_results(ccys, data_dir: Path, config: Path, jobs: int | None = None, 
     """Run `grid` (default: the standard grid) for every currency in `ccys` whose result files are not all present."""
     out_dir = Path(data_dir) / "results"
     missing = [c for c in ccys
-               if not all((out_dir / f"fc_{c}_kalman_{run_tag(*r[:3], 1.0, *r[3:])}_h{h}.parquet").exists()
+               if not all((out_dir / f"fc_{c}_kalman_{tag_of(r)}_h{h}.parquet").exists()
                           for r in _grid_for(grid, c) for h in HORIZONS)]
     if missing:
         run_grid(missing, data_dir, config, jobs=jobs, grid=grid)
+
+
+def tag_of(row) -> str:
+    """run_tag of one grid entry (3- to 6-tuple) with the default noise floor."""
+    r = tuple(row) + (None,) * (6 - len(row))
+    return run_tag(*r[:3], 1.0, *r[3:])
+
+
+def combination_forecasts(ccy: str, data_dir: Path, config: Path, horizons=HORIZONS) -> dict[str, dict]:
+    """Item 3: every combination in COMBINATION_SETS x COMBINATION_WEIGHTS, {name: {h: DataFrame}}.
+
+    Components come from the step 7b results (yields / policy rate with AR(1)
+    errors), the two-step VAR(1), forwards and the random walk, all from the
+    currency's first origin. Runs the needed backtests first if missing.
+    """
+    ensure_results([ccy], data_dir, config, grid=accuracy_grid)
+    est, fo = BACKTEST_DEFAULTS[ccy]
+    y = pd.read_parquet(Path(data_dir) / "processed" / f"curves_{ccy}.parquet")
+    y_est = y.loc[est:] if est else y
+    ext = pd.read_parquet(Path(data_dir) / "processed" / f"curves_ext_{ccy}.parquet")
+    res = Path(data_dir) / "results"
+    load = lambda tag: {h: pd.read_parquet(res / f"fc_{ccy}_kalman_{tag}_h{h}.parquet") for h in horizons}
+    comp = {"yields + AR(1)": load(tag_of((None, "fixed", None, None, "ar1"))),
+            "policy rate + AR(1)": load(tag_of((("policy_rate",), "fixed", None, None, "ar1"))),
+            "two-step VAR(1)": dns_two_step_forecasts(y_est, horizons, fo, kind="var1"),
+            "forwards": forward_forecasts(ext, y.columns, horizons, fo),
+            "random walk": random_walk_forecasts(y_est, horizons, fo)}
+    return {f"combination {k}, {w.replace('inv_mse', 'inverse MSE')}":
+            {h: combine({n: comp[n][h] for n in members}, y, h, w) for h in horizons}
+            for k, members in COMBINATION_SETS.items() for w in COMBINATION_WEIGHTS}

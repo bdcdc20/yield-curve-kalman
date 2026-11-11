@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 134 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints and AR(1) errors without look-ahead), all passing (`pytest -q`) |
+| Offline tests | **Done.** 140 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints and AR(1) errors without look-ahead), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -951,6 +951,37 @@ forecast − realised):**
      mcs`, squared-error loss, block bootstrap with blocks of max(h, 3)
      months) over every model in the step 7 and 7b grids plus the random
      walk, forwards and the two-step model.
+
+   **Grid for items 3–4, fixed on 11 Nov 2026 before any of it was run**
+   (`eval/grid.py: anchor_grid, COMBINATION_SETS`; `eval/combine.py`;
+   `python -m yck backtest --ccy USD EUR GBP --anchor`):
+
+   - **Item 4, anchoring to forwards (`anc-fwd`).** The model's Gaussian
+     h-step forecast of the curve, N(μ, Σ) with Σ = Λ P_{t+h|t} Λ' + H, is
+     exponentially tilted (minimum Kullback–Leibler change; Altavilla,
+     Giacomini & Ragusa 2017). The means at 3m, 6m, 9m and 12m then equal
+     the forward rates at the origin: μ* = μ + Σ·s Σss⁻¹(F − μs). Forwards
+     whose inputs are not published are not used, so GBP often anchors
+     fewer maturities. Applied to yields only and to yields + policy rate,
+     each plain and with `ar1` errors: 4 backtests per currency, no
+     re-estimation.
+   - **Item 3, forecast combination.** Two sets of models:
+     - set A: yields + `ar1`, two-step VAR(1), forwards, random walk;
+     - set B: set A plus yields + policy rate + `ar1`.
+
+     Each set has two weighting schemes:
+     - equal weights;
+     - inverse-MSE weights (Bates & Granger 1969), per maturity and
+       horizon. They use only errors realised by the origin (targets
+       ≤ T − h) over an expanding window, with equal weights until every
+       available model has 24 realised errors.
+
+     That gives 4 combinations per currency. A missing component (e.g. GBP
+     forwards at h = 1) is dropped and the remaining weights renormalised.
+   - **Reporting.** Every variant is reported against forwards and the
+     random walk (DM). Each anchored model is tested against the same model
+     unanchored (DM). The 90% model confidence set is extended to every
+     model from steps 7 and 7b.
 
    Fixing failures 1 and 2 also matters for step 8: the trading signal is
    F − ŷ, and the level bias would keep the strategy short duration through
