@@ -317,3 +317,23 @@ def test_tight_shrinkage_reproduces_yields_only_and_loose_reproduces_full(dra_fi
     f_y = yields_only.filtered_states(data[COLS])[-1]
     np.testing.assert_allclose(tight.forecast(f_t, 12), yields_only.forecast(f_y, 12), atol=0.02)
     assert loose.loglik == pytest.approx(full.loglik, abs=0.5)
+
+
+def test_estimates_stay_stationary_when_the_truth_has_a_unit_root():
+    """A random-walk level used to let the optimiser cross |eig| = 1, where the prior switched to diffuse."""
+    from yck.model.statespace_dns import MAX_RADIUS, spectral_radius
+
+    p = DNSParams(mu=TRUE.mu, A=TRUE.A.copy(), Q=TRUE.Q, h=TRUE.h, lam=TRUE.lam)
+    p.A[0] = [1.0, 0.0, 0.0]  # level is a random walk
+    rng = np.random.default_rng(8)
+    N = 300
+    f = np.zeros((N, 3))
+    f[0] = TRUE.mu
+    Lq = np.linalg.cholesky(p.Q)
+    for t in range(1, N):
+        f[t] = (np.eye(3) - p.A) @ p.mu + p.A @ f[t - 1] + Lq @ rng.normal(size=3)
+    y = f @ ns_loadings(GRID, p.lam).T + rng.normal(size=(N, len(GRID))) * 0.05
+    data = pd.DataFrame(y, index=pd.date_range("1990-01-31", periods=N, freq="ME"), columns=COLS)
+    fit = fit_dns_mle(data, n_starts=4)
+    assert spectral_radius(fit.params.A) < MAX_RADIUS
+    assert np.isfinite(fit.loglik) and fit.params.A[0, 0] > 0.97

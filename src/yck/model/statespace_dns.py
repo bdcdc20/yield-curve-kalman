@@ -30,9 +30,17 @@ transforms below guarantee a valid model for any theta:
 - H = diag(exp(log_h)), so measurement variances are always positive;
 - lam = exp(log_lam) when lambda is estimated.
 
-A is left free; if a trial A has an eigenvalue >= 1 the stationary prior
-does not exist and a diffuse prior is used for that evaluation instead
-(README section 6.3).
+A is left free in theta, and the model is specified as stationary: the
+first state has the stationary prior, whose variance grows without bound
+as an eigenvalue of A approaches 1. For unstable trial values the filter
+falls back to a fixed diffuse prior, so it can evaluate any parameters, but
+that makes the likelihood jump *up* at the unit circle. On short or trending
+samples (EUR; GBP; the shrunk USD macro model) the optimiser crossed and
+stopped at explosive A. The estimate is therefore required to be stationary
+(spectral radius < `MAX_RADIUS`): the search runs unrestricted, because some
+starts reach a stationary optimum only through the explosive region, and a
+run that ends explosive is redone with explosive values rejected, starting
+from A scaled back inside (`_fit_from`).
 
 Estimation is done in two phases, both driven by one compiled filter +
 smoother pass that returns sufficient statistics (`kalman.smoothed_stats`):
@@ -56,16 +64,20 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from scipy.linalg import solve_discrete_lyapunov
 from scipy.optimize import minimize
 
 from yck.model.dns import (DL_LAMBDA, FACTORS, fit_dynamics, fit_factors, fitted_yields, maturities_from_columns,
                            ns_loadings, ns_loadings_dlam)
 from yck.model.kalman import (FilterResult, SmootherStats, StateSpace, filtered_states, forecast_state,
-                              kalman_filter, rts_smoother, smoothed_stats, stationary_init)
+                              kalman_filter, lyapunov, rts_smoother, smoothed_stats, stationary_init)
 
 DIFFUSE_VAR = 100.0  # prior variance (pp^2) when A is not stable: wide relative to yield levels
 MACRO_H = 1e-8  # measurement variance of macro series: "observed without error", kept invertible
+MAX_RADIUS = 0.9999  # estimation is restricted to A with spectral radius below this (stationary model)
+
+
+def spectral_radius(A: np.ndarray) -> float:
+    return float(np.max(np.abs(np.linalg.eigvals(A))))
 
 
 def split_columns(columns) -> tuple[list, list]:
@@ -259,7 +271,8 @@ def score_fd(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: 
     return g
 
 
-def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: float = DL_LAMBDA) -> np.ndarray:
+def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: float = DL_LAMBDA,
+          params: DNSParams | None = None, model: StateSpace | None = None) -> np.ndarray:
     """Exact gradient of the log-likelihood at theta, in closed form (Fisher's identity).
 
     The gradient of the log-likelihood equals the gradient of the expected
@@ -279,8 +292,10 @@ def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: flo
     """
     n = len(tau)
     k = st.S11.shape[0]
-    p = DNSParams.from_vector(theta, n, estimate_lambda, lam, k)
-    ss = p.statespace(tau)
+    # The optimiser has already built these for the likelihood; pass them to skip a rebuild
+    # (which includes a Lyapunov solve for the stationary prior).
+    p = params if params is not None else DNSParams.from_vector(theta, n, estimate_lambda, lam, k)
+    ss = model if model is not None else p.statespace(tau)
     A, mu = p.A, p.mu
     Ik = np.eye(k)
 
@@ -307,7 +322,7 @@ def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: flo
     if np.max(np.abs(np.linalg.eigvals(A))) < 1.0:  # stationary prior: P1 depends on A and Q
         M = np.outer(x1 - ss.a1, x1 - ss.a1) + st.P_s[0]
         G1 = -0.5 * (P1inv - P1inv @ M @ P1inv)
-        Lam = solve_discrete_lyapunov(A.T, G1)
+        Lam = lyapunov(A.T, G1)
         Lam = (Lam + Lam.T) / 2
         dQ += Lam
         dA += 2.0 * Lam @ A @ ss.P1
@@ -418,6 +433,9 @@ def fit_dns_mle(
                for p in starts]
     objective = lambda f: f.loglik + f.penalty if np.isfinite(f.loglik) else -np.inf
     scouted.sort(key=lambda f: -objective(f))
+    # Note: finishing two scouts from the same basin is not wasted on the flat
+    # ridges of the macro likelihood; the second often gets further (tested:
+    # finishing one per basin was 14% faster but lost 0.2-0.6 log-lik points).
     best = None
     for f in scouted[:keep]:
         fit = _fit_from(data, n, f.params, estimate_lambda, lam, h_floor_bp, em_iters=0,
@@ -487,12 +505,17 @@ def _fit_from(
     a_slice = slice(k, k + k * k)  # A's position in theta (row-major)
     l_slice = slice(k + k * k, k + k * k + k * (k + 1) // 2)  # Cholesky factor of Q
 
+    restrict = False  # set for the repair run below
+
     def fun(theta):
         q = DNSParams.from_vector(theta, n, estimate_lambda, lam, k)
-        st = smoothed_stats(q.statespace(tau), Y)
+        if restrict and (not np.all(np.isfinite(q.A)) or spectral_radius(q.A) >= MAX_RADIUS):
+            return 1e6, np.zeros_like(theta)  # outside the stationary region: rejected, the line search backs off
+        ss = q.statespace(tau)
+        st = smoothed_stats(ss, Y)
         if not np.isfinite(st.loglik):
             return 1e6, np.zeros_like(theta)
-        g = score(theta, st, tau, estimate_lambda, lam)
+        g = score(theta, st, tau, estimate_lambda, lam, params=q, model=ss)
         pen = 0.0
         if shrink is not None:
             pen, dA, dl = shrinkage_prior(q, *shrink)
@@ -511,22 +534,39 @@ def _fit_from(
     # resets L-BFGS-B's curvature memory) is only spent when the run stopped with
     # a large gradient, i.e. it stalled rather than converged.
     opts = {"maxiter": maxiter, "maxfun": 2 * maxiter, "ftol": 1e-7 / n_obs, "gtol": grad_tol / n_obs}
-    res = None
-    restarts = 0
-    for restarts in range(1, max_restarts + 1):
-        r = minimize(fun, theta0 if res is None else res.x, jac=True, method="L-BFGS-B", bounds=bounds,
-                     options=opts)
-        res = r if res is None or r.fun < res.fun else res
-        free = np.array([not (lo is not None and x <= lo + 1e-9) for x, (lo, _) in zip(res.x, bounds)])
-        # Converged, or a restart that made no progress: the gradient is at its
-        # numerical floor (~0.01 log-lik units on USD), so further restarts are waste.
-        if np.max(np.abs(res.jac[free]), initial=0.0) * n_obs < grad_tol or (restarts > 1 and r.nit <= 1):
-            break
+
+    def optimise(theta_start):
+        res, restarts = None, 0
+        for restarts in range(1, max_restarts + 1):
+            r = minimize(fun, theta_start if res is None else res.x, jac=True, method="L-BFGS-B", bounds=bounds,
+                         options=opts)
+            res = r if res is None or r.fun < res.fun else res
+            free = np.array([not (lo is not None and x <= lo + 1e-9) for x, (lo, _) in zip(res.x, bounds)])
+            # Converged, or a restart that made no progress: the gradient is at its
+            # numerical floor (~0.01 log-lik units on USD), so further restarts are waste.
+            if np.max(np.abs(res.jac[free]), initial=0.0) * n_obs < grad_tol or (restarts > 1 and r.nit <= 1):
+                break
+        return res, restarts
+
+    # The search itself is unrestricted: some starts reach a stationary optimum
+    # only through the explosive region, and blocking that path loses it. A run
+    # that *ends* explosive (an artefact of the prior switch at the unit circle)
+    # is repaired: A is scaled back inside and the run is redone restricted to
+    # stationary A, where the stationary prior keeps it inside.
+    res, restarts = optimise(theta0)
+    note = ""
+    A_end = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k).A
+    if not np.all(np.isfinite(A_end)) or spectral_radius(A_end) >= MAX_RADIUS:
+        q = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k)
+        q.A = q.A * 0.99 * MAX_RADIUS / spectral_radius(q.A) if np.all(np.isfinite(q.A)) else p.A * 0.95
+        restrict = True
+        res, restarts = optimise(q.to_vector(estimate_lambda))
+        note = " [ended explosive: re-run restricted to stationary A]"
     params = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k)
     pen = shrinkage_prior(params, *shrink)[0] if shrink is not None else 0.0
     return DNSFit(params=params, loglik=-res.fun * n_obs - pen, n_params=theta0.size, nobs=n_obs,
                   converged=bool(res.success),
-                  message=f"EM {em_done} it; L-BFGS-B x{restarts}: {res.message}",
+                  message=f"EM {em_done} it; L-BFGS-B x{restarts}: {res.message}{note}",
                   seconds=time.perf_counter() - t0, columns=cols, estimate_lambda=estimate_lambda,
                   penalty=pen)
 
