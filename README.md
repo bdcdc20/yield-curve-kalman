@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 118 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, impulse responses vs statsmodels), all passing (`pytest -q`) |
+| Offline tests | **Done.** 134 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints and AR(1) errors without look-ahead), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -92,7 +92,7 @@ real-time sample mean (§6.3).
 | Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
-| Accuracy improvements from the literature | Planned, not started (diagnosis and ranked list in §7.6; next, §8 step 7b) |
+| Accuracy improvements from the literature | **Items 1–2 done** (`model/adjust.py`, `notebooks/05_accuracy.ipynb`, results in §7.7): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance. Items 3–8 not started (§8 step 7b; next: forecast combination, forward anchoring) |
 | Trading evaluation | Not started (§7.5; after §8 step 7b) |
 | Final write-up | Not started (§8, step 9) |
 
@@ -166,6 +166,24 @@ identified (§6.3).
 - **No model beats the forward curve significantly in any currency at 6 or
   12 months.**
 
+**Accuracy improvements, step 7b items 1–2 (`notebooks/05_accuracy.ipynb`,
+details in §7.7).** The grid of 54 variants was fixed before it was run, and
+a model confidence set covers every model in the project.
+
+- **AR(1) measurement errors** cut 1-month RMSE significantly at both ends
+  of the curve in every currency. Examples: USD 3m −11 to −18%, 10y
+  −11 to −13%; EUR 3m −20 to −33%; GBP 10y −16%. At h = 1 the 90% model
+  confidence set keeps every AR(1) variant and drops the plain λ-fixed
+  Kalman models. USD 10y against forwards goes from 1.13*** to 1.00. No gain at
+  h = 12: the residuals' half-lives are 1–6 months.
+- **Shifting endpoints** remove most of the rally bias (10y, h = 12,
+  2014–21: USD +45 → +2 bp, EUR +78 → +38 bp), but the trailing endpoint
+  overshoots when rates turn (2022–26: USD −56 → −117 bp). Net: no
+  significant RMSE change. SPF survey endpoints make USD worse, and the
+  ECB long-term HICP expectation leaves the EUR 10y bias unchanged.
+- **Still nothing beats forwards or the random walk at h = 6–12**, and the
+  confidence set cannot separate the models there.
+
 ## 3. Repository layout
 
 ```
@@ -181,9 +199,10 @@ src/yck/
   model/kalman.py           Kalman filter (missing rows), log-likelihood, RTS smoother, smoother sufficient statistics (compiled)
   model/statespace_dns.py   ML DNS (yields only or yields + macro): transforms, EM, exact score, multistart L-BFGS-B, 1 bp floor, shrinkage prior
   model/irf.py              impulse responses (Cholesky, generalised), variance decompositions, bands from the observed information
+  model/adjust.py           forecast adjustments outside the likelihood: shifting endpoints (EWMA, surveys), AR(1) measurement errors
   eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, forwards, RMSE tables
-  eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, ratio/significance tables
-  eval/grid.py              the standard grid of backtests as one job (CLI `backtest --all`, notebooks' `ensure_results`)
+  eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, model confidence set, ratio/significance tables
+  eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy`, notebooks' `ensure_results`)
 notebooks/                  analysis notebooks, committed with outputs
 tests/                      offline tests: parsers (small samples in each source's real format), real-time panels, DNS, Kalman, backtest, stats, IRFs
 .github/workflows/
@@ -204,6 +223,7 @@ Further model and evaluation modules are planned in §8.
 | `curves_{USD,EUR,GBP}.parquet` | Month-end zero-coupon yields in **percent, continuously compounded** (BoE: see 4.2). Index `date` = calendar month-end. Columns `3m, 6m, 9m, 12m, 15m, 18m, 21m, 24m, 30m, 36m, 48m, 60m, 72m, 84m, 96m, 108m, 120m` |
 | `curves_ext_{USD,EUR,GBP}.parquet` | The same month-end curves at every maturity the forward-rate benchmark needs (§7.4): the grid, each horizon h in `forecast_horizons_months`, and each grid τ + h (1m–132m). GBP: only maturities the BoE publishes (61/73/85/97/109/121m are not, so 1-month forwards for τ ≥ 60m are missing) |
 | `macro_{USD,EUR,GBP}.parquet` | Monthly `real_activity`, `inflation`, `policy_rate`, **latest vintage**, index = month-end. Transforms already applied (see table below) |
+| `surveys_{USD,EUR}.parquet` | Quarterly survey expectations indexed by the first day of the survey quarter: USD `bond10`, `cpi10`; EUR `hicp_lt`. **Not yet aligned to publication dates**: use `yck.model.adjust.survey_endpoint`, which applies `survey_known_month` |
 | `vintages_USD.parquet` | ALFRED real-time history, long format: `series_id, date, realtime_start, realtime_end, value` (`realtime_end` of a still-current vintage is set to 2262-04-11) |
 | `coverage.md` | First/last date and in-range gaps for every series, plus cross-checks |
 
@@ -245,6 +265,15 @@ history, so they use the latest vintage plus a conservative publication lag
 (`release_lag_months` in the config: real activity 2, inflation 1, policy
 rate 0). **The lag is not applied in the processed files.** It must be
 applied in the forecasting code (§7.3).
+
+**Surveys** (shifting endpoints, §7.7). Quarterly. A survey counts as known
+from the end of the second month of its quarter (`survey_known_month`).
+
+| | Series | Coverage |
+|---|---|---|
+| USD | Philadelphia Fed SPF `Median_BOND10_Level.xlsx`: median expected average 10y Treasury yield over the next 10 years | First-quarter surveys only, 1992– |
+| USD | Philadelphia Fed SPF `Median_CPI10_Level.xlsx`: median expected average CPI inflation over the next 10 years | Every quarter, 1991Q4– |
+| EUR | ECB `SPF.Q.U2.HICP.POINT.LT.Q.AVG`: longer-term (about 5 years ahead) HICP expectation, average of point forecasts | 1999– (some early years annual) |
 
 ## 5. Data findings and quirks (read before modelling)
 
@@ -703,6 +732,82 @@ expectations (quarterly). There is no long free UK survey, so GBP uses the
 smoothing variant. The expected effects in §8 step 7b are a reading of the
 literature, not results from this project.
 
+### 7.7 Results: persistent errors and shifting endpoints (step 7b items 1–2)
+
+`notebooks/05_accuracy.ipynb`. The grid (§8 step 7b) was fixed and committed
+before any of it was run. It covers yields only and yields + policy rate,
+each with every endpoint and error model: 24 USD, 18 EUR and 12 GBP
+backtests. Origins from 2000 (USD) and 2010 (EUR, GBP). Each change is tested
+against its own model without it: Clark–West for the error models, which
+nest it; Diebold–Mariano for the endpoints, which do not. The 90% model
+confidence set (MCS; Hansen, Lunde & Nason 2011, squared-error loss, block
+bootstrap) covers every model in notebooks 02–05: 34 in USD, 28 in EUR and
+22 in GBP.
+
+**AR(1) measurement errors: one-month RMSE ratio to the same model without
+them** (fixed μ; the range covers yields only and policy rate, `ar1` and
+`ar1c`). All significant at 1% (Clark–West), except GBP 5y (5–10%):
+
+| | Short end | 5y | 10y |
+|---|---|---|---|
+| USD | 3m: 0.82–0.89 | 0.96 | 0.87–0.89 |
+| EUR | 3m: 0.67–0.80 | 0.87–0.89 | 0.99–1.03 |
+| GBP | 6m: 0.74–0.90 | 0.99 | 0.84 |
+
+- **Confidence set.** At h = 1, the set on the loss pooled over maturities
+  keeps every AR(1) variant, the random walk, the λ-estimated Kalman model
+  and, in USD and EUR, forwards and the two-step VAR. It drops every other
+  plain Kalman model: the λ-fixed models (MCS p-values 0.00–0.06 in all
+  three currencies), the endpoint models without AR(1) errors, and the full
+  macro and shrinkage models.
+- **Against forwards at h = 1:**
+  - USD 10y goes from 1.13*** to 1.00 and USD 3m from 1.22–1.27*** to
+    1.03–1.09.
+  - EUR 3m (1.61–1.74***) and GBP 6m (1.59–1.97***) still lose clearly.
+- **No gain at h = 12** (0.96–1.07). The residuals' half-lives are 1–6
+  months in USD and EUR; GBP 10y is the exception at 16 months.
+- **The intercept (`ar1c`) adds little over `ar1`.** Raviv's (2013) ~31%
+  gain at 10y, h = 12, is not reproduced.
+
+**Shifting endpoints: mean 10y forecast error at h = 12, yields only (bp,
+forecast − realised):**
+
+| | Period | Fixed μ | EWMA | Survey | Random walk | Forwards |
+|---|---|---|---|---|---|---|
+| USD | 2000–07 | +51 | +12 | +43 (`bond10`) / +74 (`cpi10`) | +20 | +47 |
+| USD | 2014–21 | +45 | +2 | +63 / +80 | +12 | +33 |
+| USD | 2022–26 | −56 | −117 | −122 / −54 | −62 | −56 |
+| EUR | 2010–13 | +92 | +68 | +93 (`hicp_lt`) | +39 | +76 |
+| EUR | 2014–21 | +78 | +38 | +77 | +28 | +49 |
+| EUR | 2022–26 | −57 | −110 | −56 | −69 | −63 |
+| GBP | 2014–21 | +42 | +14 | – | +20 | +43 |
+| GBP | 2022–26 | −93 | −151 | – | −84 | −74 |
+
+- **The EWMA endpoint removes most of the bias in trending years, then
+  overshoots when rates turn.** The endpoint lags, and μ_level (the average
+  gap between the level and its trailing mean) is negative over a
+  falling-rate sample, so the model extrapolates the trend.
+- **Net 10y RMSE at h = 12 against fixed μ:** 0.97 (USD), 1.00 (EUR), 1.06
+  (GBP). None is significant.
+- **US surveys make things worse.** Survey forecasters expected
+  normalisation just as the model did: 5y at h = 12 is 7–17% worse than
+  fixed μ, significantly for `cpi10`.
+- **The ECB long-term HICP expectation helps the 3m–2y slightly** (2–4% at
+  h = 12, DM 5–10%) but leaves the 10y bias where it was. It moved only
+  between 1.7% and 2.0% while real rates fell. An anchor that tracks
+  falling rates needs r* as well (Bauer & Rudebusch 2020).
+- van Dijk et al.'s 0.77 × random walk at 10y, h = 12, is not reproduced;
+  the best here is 1.07 (USD, EWMA).
+
+**What changes.**
+- AR(1) errors (`ar1`) become part of the model for one-month forecasts and
+  for the trading signal.
+- Endpoints are not adopted as the default; EWMA stays as a variant for
+  trending regimes.
+- At h = 6–12 no variant beats forwards or the random walk, and the MCS
+  keeps 20–34 models at every maturity. The remaining gap is failure 4, the
+  information in the forward curve, which items 3–4 of step 7b target.
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -801,7 +906,9 @@ literature, not results from this project.
    required to be stationary, and μ is fixed at the real-time sample mean
    (§6.3), which made every fit well-posed and changed all Kalman results
    (USD RMSE ratios improved by 0.01–0.07).
-7b. **Accuracy improvements (§7.6), in this order.** Fix the full grid of
+7b. **Accuracy improvements (§7.6), in this order.** Items 1–2 ✅ (results in
+   §7.7: AR(1) errors adopted for h = 1, endpoints not adopted); next: item 3,
+   then 4. Fix the full grid of
    variants before running it, report every variant, and add a model
    confidence set across all models to the DM/CW tables, to avoid data
    snooping. Each step keeps real-time data and filtered states (§7.3).

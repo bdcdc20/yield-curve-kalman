@@ -29,10 +29,14 @@ evaluation protocol, the roadmap and the decisions already made.
   §7.4). Since 11 Nov 2026 μ is fixed at the real-time sample mean and
   estimates are required to be stationary (README §6.3). Result: no model
   beats forwards significantly in any currency; the policy rate helps only
-  in USD; EUR loses to the random walk through mean reversion. Next: the
-  accuracy improvements in README §8 step 7b (diagnosis and literature in
-  §7.6; start with AR(1) measurement errors and a shifting endpoint for the
-  level), then the trading evaluation (step 8), then the write-up (step 9).
+  in USD; EUR loses to the random walk through mean reversion.
+- Roadmap step 7b items 1–2 are done (`model/adjust.py`, survey data,
+  model confidence set in `eval/stats.py`, `backtest --accuracy`, notebook
+  05, README §7.7): AR(1) measurement errors fix h = 1, shifting endpoints
+  do not help on balance, nothing beats forwards at h = 6–12. Next: step 7b
+  item 3 (forecast combination), then item 4 (anchor the short end to
+  forwards), then the trading evaluation (step 8), then the write-up (step 9).
+  Fix each new grid in README §8 and commit it before running it.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. `python -m yck backtest --ccy USD EUR GBP --all`
   runs the whole standard grid (24 backtests, 488 refits) in ~1.5 min from
@@ -50,7 +54,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 133 passed
+python3 -m pytest -q                  # expect 134 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```
