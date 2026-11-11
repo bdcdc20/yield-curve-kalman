@@ -3,7 +3,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yck.eval.stats import clark_west, cw_table, diebold_mariano, dm_table, newey_west_var_of_mean
+from yck.eval.stats import (_block_bootstrap_means, clark_west, cw_table, diebold_mariano, dm_table, mcs,
+                             mcs_table, newey_west_var_of_mean)
 
 
 def test_newey_west_by_hand():
@@ -91,3 +92,40 @@ def test_cw_table_matches_clark_west_on_the_common_sample():
     assert t.loc["3m", ("L", "cw")] == pytest.approx(ref["stat"])
     assert t.loc["3m", ("L", "ratio")] < 1 and t.loc["3m", ("L", "cell")].endswith("***")
     assert ("S", "ratio") not in t.columns
+
+
+# --------------------------------------------------------------------------- model confidence set
+def test_block_bootstrap_means_match_explicit_resampling():
+    rng = np.random.default_rng(3)
+    L = rng.normal(size=(23, 2))
+    got = _block_bootstrap_means(L, 5, 4, np.random.default_rng(9))
+    starts = np.random.default_rng(9).integers(0, 23 - 5 + 1, size=(4, 5))
+    for b in range(4):
+        rows = np.concatenate([np.arange(s0, s0 + 5) for s0 in starts[b]])[:23]
+        np.testing.assert_allclose(got[b], L[rows].mean(axis=0))
+
+
+def test_mcs_drops_a_clearly_worse_model_and_keeps_equal_ones():
+    rng = np.random.default_rng(0)
+    T = 300
+    common = rng.normal(size=T) ** 2
+    L = pd.DataFrame({"a": common + 0.1 * rng.normal(size=T) ** 2, "b": common + 0.1 * rng.normal(size=T) ** 2,
+                      "bad": common + 1.0 + 0.1 * rng.normal(size=T) ** 2})
+    res = mcs(L, block=3, n_boot=1000)
+    assert res.loc["bad", "p_mcs"] < 0.01 and res.loc["bad", "rank"] == 1
+    assert res.loc[["a", "b"], "p_mcs"].min() > 0.10
+    assert res["p_mcs"].max() == 1.0
+    order = res.sort_values("rank")["p_mcs"].to_numpy()
+    assert np.all(np.diff(order) >= 0)  # p-values never fall along the elimination order
+
+
+def test_mcs_table_layout_and_pooled_column():
+    idx = pd.date_range("2000-01-31", periods=200, freq="ME")
+    rng = np.random.default_rng(2)
+    actual = pd.DataFrame({"3m": rng.normal(size=200), "10y": rng.normal(size=200)}, index=idx)
+    good = actual + 0.1 * rng.normal(size=(200, 2))
+    bad = actual + 1.0 * rng.normal(size=(200, 2))
+    bad.iloc[0, 0] = np.nan  # dropped from that maturity's sample only
+    t = mcs_table({"good": good, "bad": bad}, actual, h=1, n_boot=500)
+    assert list(t.columns) == ["3m", "10y", "all"]
+    assert (t.loc["good"] == 1.0).all() and (t.loc["bad"] < 0.05).all()

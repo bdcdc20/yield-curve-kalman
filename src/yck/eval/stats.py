@@ -19,6 +19,11 @@ complications matter for yield forecasts:
 
 Conventions: positive statistics mean model 2 is *more* accurate than
 model 1 (model 1 is the benchmark).
+
+Pairwise tests against one benchmark invite data snooping once many variants
+are tried (roadmap step 7b). The **model confidence set** (Hansen, Lunde &
+Nason 2011) answers the joint question instead: which models cannot be
+told apart from the best one, given every model compared (`mcs`, `mcs_table`).
 """
 from __future__ import annotations
 
@@ -169,3 +174,94 @@ def cw_table(forecasts: dict[str, pd.DataFrame], small: str, actual: pd.DataFram
     out = pd.DataFrame(rows).T
     out.columns = pd.MultiIndex.from_tuples(out.columns)
     return out
+
+
+# --------------------------------------------------------------------------- model confidence set
+def _block_bootstrap_means(L: np.ndarray, block: int, n_boot: int, rng) -> np.ndarray:
+    """Moving-block bootstrap of the column means of L (T x m): returns (n_boot, m).
+
+    Each resample joins ceil(T / block) blocks of `block` consecutive rows with
+    uniform random starts, truncated to T rows. Block sums come from prefix sums,
+    so a resample costs O(blocks x m) instead of O(T x m).
+    """
+    T, m = L.shape
+    block = int(min(max(block, 1), T))
+    nb = -(-T // block)
+    cs = np.vstack([np.zeros((1, m)), np.cumsum(L, axis=0)])
+    starts = rng.integers(0, T - block + 1, size=(n_boot, nb))
+    sums = (cs[starts + block] - cs[starts]).sum(axis=1)  # (n_boot, m): nb full blocks
+    extra = nb * block - T  # trim the surplus rows off the end of the last block
+    if extra:
+        last = starts[:, -1]
+        sums -= cs[last + block] - cs[last + block - extra]
+    return sums / T
+
+
+def mcs(losses: pd.DataFrame, block: int = 3, n_boot: int = 2000, seed: int = 0) -> pd.DataFrame:
+    """Hansen-Lunde-Nason model confidence set with the T_max statistic.
+
+    `losses` is T x m (one column per model, no missing values). At each step,
+    model i's relative loss is d_i = mean_t(L_it - mean_j L_jt) over the
+    surviving models; t_i = d_i / sd(d_i), with sd from a moving-block
+    bootstrap (blocks of `block` months, to respect the overlap of h-step
+    errors). The test of "all surviving models are equally accurate" uses
+    T_max = max_i t_i against its bootstrap distribution; if rejected, the
+    model with the largest t_i goes. The MCS p-value of a model is the largest
+    test p-value up to its elimination, so the set {p >= alpha} contains the
+    best model with probability >= 1 - alpha asymptotically. The last model
+    standing has p = 1.
+
+    Returns one row per model: mean loss, MCS p-value and elimination rank
+    (1 = first eliminated; the survivor gets m).
+    """
+    names = list(losses.columns)
+    L = losses.to_numpy(float)
+    if not np.isfinite(L).all():
+        raise ValueError("mcs needs a common sample without missing losses")
+    rng = np.random.default_rng(seed)
+    Lbar = L.mean(axis=0)
+    Lstar = _block_bootstrap_means(L, block, n_boot, rng)  # (n_boot, m)
+    alive = list(range(len(names)))
+    pvals, ranks, p_run = {}, {}, 0.0
+    for rank in range(1, len(names)):
+        a = np.array(alive)
+        d = Lbar[a] - Lbar[a].mean()
+        dstar = Lstar[:, a] - Lstar[:, a].mean(axis=1, keepdims=True)
+        sd = np.sqrt(((dstar - d) ** 2).mean(axis=0))
+        sd = np.where(sd > 0, sd, np.inf)  # identical models: never the worst
+        t = d / sd
+        tmax_star = ((dstar - d) / sd).max(axis=1)
+        p_run = max(p_run, float(np.mean(tmax_star >= t.max())))
+        worst = alive[int(np.argmax(t))]
+        pvals[worst], ranks[worst] = p_run, rank
+        alive.remove(worst)
+    pvals[alive[0]], ranks[alive[0]] = 1.0, len(names)
+    return pd.DataFrame({"mean_loss": Lbar, "p_mcs": [pvals[i] for i in range(len(names))],
+                         "rank": [ranks[i] for i in range(len(names))]}, index=pd.Index(names, name="model"))
+
+
+def mcs_table(forecasts: dict[str, pd.DataFrame], actual: pd.DataFrame, h: int, columns=None,
+              block: int | None = None, n_boot: int = 2000, seed: int = 0, pooled: bool = True) -> pd.DataFrame:
+    """MCS p-values (squared-error loss) for every model, one column per maturity.
+
+    Each maturity uses the targets where the realised yield and every model's
+    forecast exist. With `pooled`, an extra column 'all' uses the loss
+    averaged over maturities, on the dates where every maturity is available.
+    The block length defaults to max(h, 3) months. A model is in the 90% MCS
+    when its p-value is >= 0.10.
+    """
+    columns = list(columns or actual.columns)
+    block = block or max(h, 3)
+    idx = actual.index
+    for f in forecasts.values():
+        idx = idx.intersection(f.index)
+    a = actual.loc[idx, columns]
+    sq = {n: (f.loc[idx, columns] - a) ** 2 for n, f in forecasts.items()}
+    out = {}
+    for col in columns:
+        L = pd.DataFrame({n: e[col] for n, e in sq.items()}).dropna()
+        out[col] = mcs(L, block, n_boot, seed)["p_mcs"]
+    if pooled:
+        L = pd.DataFrame({n: e.mean(axis=1, skipna=False) for n, e in sq.items()}).dropna()
+        out["all"] = mcs(L, block, n_boot, seed)["p_mcs"]
+    return pd.DataFrame(out)
