@@ -83,3 +83,22 @@ def test_variable_subset():
     assert list(rt.at("2001-03-31").columns) == ["policy_rate"]
     with pytest.raises(ValueError):
         RealTimeMacro(_latest(), SPECS, LAGS, _vintages(), variables=("gdp",))
+
+
+def test_withdrawn_history_falls_back_to_last_complete_vintage():
+    """ALFRED marks PCEPI history missing for a few days around comprehensive revisions."""
+    v = _vintages()
+    gap_start, gap_end = pd.Timestamp("2001-04-20"), pd.Timestamp("2001-05-05")
+    live = (v["realtime_start"] <= gap_start) & (v["realtime_end"] >= gap_start)
+    withdrawn = v[(v["series_id"] == "PCEPI") & live].copy()
+    v.loc[withdrawn.index, "realtime_end"] = gap_start - pd.Timedelta(days=1)  # old vintage ends
+    blank = withdrawn.assign(realtime_start=gap_start, realtime_end=gap_end, value=np.nan)
+    blank.loc[blank["date"] >= pd.Timestamp("2001-03-01"), "value"] = 200.0  # only recent months on the new basis
+    reissued = withdrawn.assign(realtime_start=gap_end + pd.Timedelta(days=1))
+    v = pd.concat([v, blank, reissued], ignore_index=True)
+
+    rt = RealTimeMacro(_latest(), SPECS, LAGS, v)
+    during = rt.at("2001-04-30")["inflation"].dropna()
+    assert during.loc["2001-02-28"] == pytest.approx(100 * (1.005**12 - 1))  # the vintage of 2001-04-19
+    assert during.index[-1] == pd.Timestamp("2001-03-31")  # March was printed on 2001-04-15, before the gap
+    assert rt.at("2001-05-31")["inflation"].dropna().index[-1] == pd.Timestamp("2001-04-30")

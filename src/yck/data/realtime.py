@@ -15,6 +15,11 @@ it in a backtest is look-ahead bias. README section 7.3 sets the rules:
   stated as a limitation.
 - **Origins before a series' first vintage** (PCEPI vintages start 2000-08):
   use the earliest vintage, truncated with the release lag.
+- **Withdrawn history.** During comprehensive NIPA revisions ALFRED records
+  most of the PCE price index as missing ('.') until BEA republishes it on
+  the new basis (PCEPI: 2003-12-23 to 2004-01-04, and 2009-08-04). On those
+  days the series cannot be used, so the last complete vintage is used
+  instead: the data a forecaster already had (`as_of_complete`).
 
 Monthly data are indexed by the end of their reference month throughout.
 """
@@ -29,6 +34,22 @@ from .build import to_monthly
 from .sources import as_of
 
 VARIABLES = ("real_activity", "inflation", "policy_rate")
+
+
+def as_of_complete(vintages: pd.DataFrame, asof) -> pd.Series:
+    """The latest vintage published on or before `asof` that has no missing values.
+
+    Normally this is `as_of(vintages, asof)`. If that vintage records values as
+    missing (history withdrawn during a revision), step back to the day before
+    the missing records were published, repeatedly if needed.
+    """
+    d = pd.Timestamp(asof)
+    while True:
+        live = vintages[(vintages["realtime_start"] <= d) & (vintages["realtime_end"] >= d)]
+        gaps = live[live["value"].isna()]
+        if gaps.empty:
+            return live.set_index("date")["value"].sort_index()
+        d = gaps["realtime_start"].min() - pd.Timedelta(days=1)
 
 
 class RealTimeMacro:
@@ -69,10 +90,10 @@ class RealTimeMacro:
         first = v["realtime_start"].min()
         transform = self.specs[var].get("transform", "level")
         if origin < first:
-            raw = as_of(v, first)
+            raw = as_of_complete(v, first)
             s = to_monthly(raw, transform)
             return s.loc[: origin - pd.offsets.MonthEnd(self.release_lag.get(var, 0))]
-        return to_monthly(as_of(v, origin), transform).loc[:origin]
+        return to_monthly(as_of_complete(v, origin), transform).loc[:origin]
 
     def at(self, origin, index: pd.DatetimeIndex | None = None) -> pd.DataFrame:
         """Macro panel as known at month-end `origin`, reindexed to `index` (NaN = not yet known)."""
