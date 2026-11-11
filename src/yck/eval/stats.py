@@ -245,8 +245,10 @@ def mcs_table(forecasts: dict[str, pd.DataFrame], actual: pd.DataFrame, h: int, 
     """MCS p-values (squared-error loss) for every model, one column per maturity.
 
     Each maturity uses the targets where the realised yield and every model's
-    forecast exist. With `pooled`, an extra column 'all' uses the loss
-    averaged over maturities, on the dates where every maturity is available.
+    forecast exist; a model with no forecasts at all for a maturity (e.g.
+    GBP forwards at h = 1, which need the 1m yield) is left out there and
+    gets NaN. With `pooled`, an extra column 'all' uses the loss averaged over
+    maturities, on the dates where every maturity is available.
     The block length defaults to max(h, 3) months. A model is in the 90% MCS
     when its p-value is >= 0.10.
     """
@@ -258,10 +260,12 @@ def mcs_table(forecasts: dict[str, pd.DataFrame], actual: pd.DataFrame, h: int, 
     a = actual.loc[idx, columns]
     sq = {n: (f.loc[idx, columns] - a) ** 2 for n, f in forecasts.items()}
     out = {}
+
+    def run(L: pd.DataFrame) -> pd.Series:
+        return mcs(L.dropna(axis=1, how="all").dropna(), block, n_boot, seed)["p_mcs"]
+
     for col in columns:
-        L = pd.DataFrame({n: e[col] for n, e in sq.items()}).dropna()
-        out[col] = mcs(L, block, n_boot, seed)["p_mcs"]
+        out[col] = run(pd.DataFrame({n: e[col] for n, e in sq.items()}))
     if pooled:
-        L = pd.DataFrame({n: e.mean(axis=1, skipna=False) for n, e in sq.items()}).dropna()
-        out["all"] = mcs(L, block, n_boot, seed)["p_mcs"]
-    return pd.DataFrame(out)
+        out["all"] = run(pd.DataFrame({n: e.mean(axis=1, skipna=False) for n, e in sq.items()}))
+    return pd.DataFrame(out).reindex(list(forecasts))

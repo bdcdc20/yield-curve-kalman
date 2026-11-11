@@ -129,3 +129,15 @@ def test_mcs_table_layout_and_pooled_column():
     t = mcs_table({"good": good, "bad": bad}, actual, h=1, n_boot=500)
     assert list(t.columns) == ["3m", "10y", "all"]
     assert (t.loc["good"] == 1.0).all() and (t.loc["bad"] < 0.05).all()
+
+
+def test_mcs_table_leaves_out_a_model_with_no_forecasts_at_a_maturity():
+    idx = pd.date_range("2000-01-31", periods=120, freq="ME")
+    rng = np.random.default_rng(4)
+    actual = pd.DataFrame({"6m": rng.normal(size=120), "5y": rng.normal(size=120)}, index=idx)
+    a = actual + 0.2 * rng.normal(size=(120, 2))
+    fwd = a.copy()
+    fwd["5y"] = np.nan  # no forward at this maturity
+    t = mcs_table({"a": a, "fwd": fwd}, actual, h=1, n_boot=200)
+    assert np.isnan(t.loc["fwd", "5y"]) and np.isnan(t.loc["fwd", "all"])
+    assert t.loc["a", "5y"] == 1.0 and np.isfinite(t.loc["fwd", "6m"])
