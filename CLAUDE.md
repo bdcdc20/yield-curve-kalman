@@ -23,12 +23,14 @@ evaluation protocol, the roadmap and the decisions already made.
   benchmark (`curves_ext_{CCY}.parquet`, `eval.backtest.forward_forecasts`)
   and DM/CW tests (`eval/stats.py`). USD: nothing beats the random walk
   significantly at h = 6, 12; no yields-only model beats forwards.
-- Roadmap step 6 (yields + macro, USD) is done: real-time panels, DRA
-  model, policy-rate-only variant, shrinkage prior, impulse responses and
-  variance decompositions (`model/irf.py`), `notebooks/03_macro_usd.ipynb`
-  (README §7.4). USD result: only the policy rate helps (short end, vs
-  yields-only); nothing beats forwards significantly; in sample the curve
-  leads macro more than the reverse. Next: EUR/GBP (step 7), trading last.
+- Roadmap steps 6 and 7 are done: yields + macro (real-time panels, DRA
+  model, policy-rate-only variant, shrinkage, impulse responses) for USD, and
+  EUR/GBP with the cross-currency comparison (notebooks 03, 04; README
+  §7.4). Since 11 Nov 2026 μ is fixed at the real-time sample mean and
+  estimates are required to be stationary (README §6.3). Result: no model
+  beats forwards significantly in any currency; the policy rate helps only
+  in USD; EUR loses to the random walk through mean reversion. Next: the
+  trading evaluation (step 8), then the write-up (step 9).
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. `python -m yck backtest --ccy USD EUR GBP --all`
   runs the whole standard grid (24 backtests, 488 refits) in ~1.5 min from

@@ -77,29 +77,23 @@ Notes:
 
 ## 2. Project status
 
-As of 11 Nov 2026. **Note:** the result tables in this section and in §7.4
-were produced with an *estimated* long-run mean μ. Since 11 Nov μ is fixed at
-the real-time sample mean (§6.3); the tables and notebooks 02–04 are being
-regenerated. First comparison at h = 12 (RMSE / RW): the USD policy-rate model
-improves from 0.88 / 0.98 / 1.06 / 1.17 / 1.11 to 0.87 / 0.96 / 1.04 / 1.12 /
-1.07 (3m … 10y) and the USD 10y bias in 2000–07 falls from +52 to +37 bp; EUR
-gets slightly worse (reverting to the 2004–09 mean hurts in the negative-rate
-decade), GBP is mixed.
+As of 11 Nov 2026. All Kalman results use the long-run mean μ fixed at the
+real-time sample mean (§6.3).
 
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 102 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, EM, exact score, shrinkage, DM/CW, impulse responses vs statsmodels), all passing (`pytest -q`) |
+| Offline tests | **Done.** 118 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, impulse responses vs statsmodels), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
-| Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; ~20 ms per likelihood on USD 1985– |
-| One-step maximum-likelihood DNS (yields only) | **Done** (`statespace_dns.py`, `notebooks/02_kalman_usd.ipynb`). EM + exact score, 1 bp noise floor, multistart; full USD backtest ~1 min from scratch (both λ variants), seconds from cache |
+| Kalman filter + RTS smoother with missing observations | **Done** (`src/yck/model/kalman.py`). Matches statsmodels to ~1e-9 (log-likelihood, filtered/smoothed states and covariances), with gaps; 0.16–0.36 ms per filter + smoother pass on USD 1985– (§8, step 4d) |
+| One-step maximum-likelihood DNS (yields only) | **Done** (`statespace_dns.py`, `notebooks/02_kalman_usd.ipynb`). EM + exact score, 1 bp noise floor, multistart, μ fixed at the sample mean, stationary estimates; every backtest in the project (`backtest --all`) ~1.5 min from scratch, seconds from cache |
 | Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
-| EUR and GBP | Not started (§8, step 7) |
-| Trading evaluation | Not started (§7.5; last) |
-| Cross-currency comparison and write-up | Not started |
+| EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
+| Trading evaluation | Not started (§7.5; next, §8 step 8) |
+| Final write-up | Not started (§8, step 9) |
 
 Latest verified coverage (month-end, output of `python -m yck fetch`):
 
@@ -132,22 +126,44 @@ not fix this. Can macro information correct it? That is the question for
 §6.4.
 
 **One-step Kalman / ML DNS (`notebooks/02_kalman_usd.ipynb`).** In-sample
-log-likelihood 13,285 (λ fixed) and 15,396 (λ estimated, 0.039), with a
-1 bp noise floor, against 11,168 at the two-step estimates. Out of sample (refit yearly, filtered
-states), h = 12:
+log-likelihood 13,284 (λ fixed) and 15,394 (λ estimated, 0.039), with a
+1 bp noise floor, against 11,168 at the two-step estimates. Out of sample
+(refit yearly, filtered states), h = 12:
 
 | | 3m | 12m | 24m | 60m | 120m |
 |---|---|---|---|---|---|
 | Two-step VAR(1) | **0.88** | **0.96** | 1.02 | 1.12 | 1.07 |
-| Kalman, λ fixed | 0.91 | 1.00 | 1.07 | 1.19 | 1.14 |
-| Kalman, λ estimated | 0.94 | 1.01 | 1.07 | 1.17 | 1.19 |
+| Kalman, λ fixed | 0.89 | 0.98 | 1.05 | 1.15 | 1.10 |
+| Kalman, λ estimated | 0.92 | 0.99 | 1.04 | 1.12 | 1.12 |
 
-Better in-sample fit, worse forecasts. The estimated long-run level μ was
-6.1–8.3% in every refit while the 10y yield was mostly 1–5%, so the
-mean-reversion bias is stronger, not weaker (10y, h = 12, 2000–07: +61 bp
-vs +47 bp for the two-step VAR). An earlier numerical-gradient estimator
-often stopped short of the maximum, but its forecasts differed from these by
-only a few bp (RMSE ratios ≤ 0.03), so the conclusion is robust.
+Much better in-sample fit, no better forecasts: the Kalman model matches the
+two-step VAR(1) but does not beat it. The reason is the same mean-reversion
+bias. μ is fixed at the 1985-to-date mean of the level factor (5.4–7.9%
+across refits), while the 10y yield was mostly 1–5% after 2000 (10y, h = 12,
+2000–07: +51 bp, against +47 bp for the two-step VAR and +20 bp for the
+random walk). With μ *estimated*, as in an earlier version, the bias was
+larger (+61 bp) and every ratio 0.02–0.04 worse; estimated μ is barely
+identified (§6.3).
+
+**Yields + macro and the cross-currency comparison (`notebooks/03_macro_usd.ipynb`,
+`notebooks/04_eur_gbp.ipynb`, details in §7.4).**
+
+- **USD:** only the policy rate adds information. The 4-state model beats
+  yields-only by Clark–West at every maturity at h = 12 (RMSE −1% to −3%)
+  and is level with forwards (RMSE ratio 0.95–1.01, not significant). The
+  full model with capacity utilisation and inflation overfits.
+- **EUR:** every model loses to the random walk (Kalman models by 9–63%)
+  and significantly to forwards, because forecasts revert to a 2004-onward
+  mean the zero/negative-rate decade never returned to (10y, h = 12,
+  2010–13: +92 bp too high).
+- **GBP:** close to the random walk and forwards (ratio to forwards
+  0.93–1.16), never significantly better; macro does not help.
+- **In sample, the curve leads policy in all three currencies** (a
+  curvature shock raises the policy rate by 20–30 bp at a 15–20 month peak),
+  while macro shocks explain only 4–10% of the factors' 12-month forecast
+  variance.
+- **No model beats the forward curve significantly in any currency at 6 or
+  12 months.**
 
 ## 3. Repository layout
 
@@ -477,12 +493,14 @@ instead ask whether it beats **what the market already prices**.
   alone contains nothing the market has not already priced, which makes
   the macro model (§6.4) the real test.
 - **Yields + macro, first results (USD, real-time macro).** The full DRA
-  model (6 states, 80 parameters; Kalman, λ fixed) is *worse* than
-  yields-only: RMSE ratio to RW at h = 12 is 1.00 / 1.10 / 1.19 / 1.29 /
-  1.26 (3m / 12m / 24m / 5y / 10y), significantly worse than RW at 2y+.
+  model (6 states, 74 parameters with μ fixed; Kalman, λ fixed) is *worse*
+  than yields-only: RMSE ratio to RW at h = 12 is 0.97 / 1.06 / 1.13 / 1.22 /
+  1.23 (3m / 12m / 24m / 5y / 10y), significantly worse than RW at 2y+.
   Clark–West finds no gain from macro at h = 12, only faint short-end
-  signal at h = 1 and 6 (p 0.02–0.10). The likely cause is overfitting:
-  36 VAR coefficients, most weakly identified. A *parsimonious* version
+  signal at h = 6 (p 0.05–0.09). The likely cause is overfitting:
+  36 VAR coefficients, most weakly identified. It is also numerically
+  fragile: two fits within 0.7 log-likelihood points of each other can give
+  12-month forecasts up to ~150 bp apart (§8, step 4d). A *parsimonious* version
   supports this. A two-step VAR on (level, slope, curvature, fed funds)
   beats the yields-only VAR by Clark–West at the short end (3m and 12m at
   h = 6, 12, p ≤ 0.05). Its RMSE ratios to RW are the best so far
@@ -490,31 +508,30 @@ instead ask whether it beats **what the market already prices**.
   it is below forwards (0.95–0.99), though not significantly. So macro
   information helps the short end when the model is small enough to
   estimate it.
-- **Restricted and shrunk macro models (USD, Kalman, real-time macro, h = 6 / 12).**
-  *Superseded (11 Nov 2026):* 17 of the 27 τ = 0.01 refits behind the shrinkage
-  rows below had explosive A (§6.3). These rows will be replaced by the rerun
-  with stationary estimates; the yields-only, full-macro and policy-rate rows
-  are unaffected.
+- **Restricted and shrunk macro models (USD, Kalman, real-time macro, μ fixed).**
+  RMSE relative to yields-only Kalman, Clark–West p in brackets where < 0.10:
 
-  | vs yields-only Kalman (Clark–West p) | 3m | 12m | 24m | 5y | 10y |
+  | | 3m | 12m | 24m | 5y | 10y |
   |---|---|---|---|---|---|
-  | Policy rate only, h = 6 | 0.95 (0.01) | 0.97 (0.01) | 0.99 (0.06) | 1.00 | 1.02 |
-  | Policy rate only, h = 12 | 0.96 (0.03) | 0.98 (0.10) | 0.99 | 0.99 | 0.98 (0.04) |
-  | All 3, shrunk τ = 0.01, h = 12 | 1.01 | 0.99 | 0.98 | 0.96 (< 0.10) | 0.97 (< 0.10) |
-  | All 3, shrunk τ = 0.1, h = 12 | 1.15 | 1.15 | 1.15 | 1.12 | 1.15 |
-  | All 3, unrestricted, h = 12 | 1.09 | 1.10 | 1.11 | 1.09 | 1.10 |
+  | Policy rate only, h = 6 | 0.96 (0.02) | 0.98 (0.03) | 0.99 (0.07) | 0.99 | 1.01 |
+  | Policy rate only, h = 12 | 0.98 (0.03) | 0.99 (0.05) | 0.99 (0.05) | 0.98 (0.06) | 0.97 (0.07) |
+  | All 3, shrunk τ = 0.01, h = 12 | 1.01 | 1.00 | 1.00 | 1.02 | 1.03 |
+  | All 3, shrunk τ = 0.03, h = 12 | 1.12 | 1.10 | 1.09 | 1.08 | 1.13 |
+  | All 3, shrunk τ = 0.1, h = 12 | 1.14 | 1.12 | 1.10 | 1.07 | 1.12 |
+  | All 3, shrunk τ = 0.3, h = 12 | 1.11 | 1.10 | 1.09 | 1.07 | 1.12 |
+  | All 3, unrestricted, h = 12 | 1.10 | 1.09 | 1.08 | 1.06 | 1.12 |
 
-  The **policy rate** adds significant information at the short end.
-  Capacity utilisation and inflation do not help out of sample: shrinking
-  their links towards zero (a Minnesota-style prior on both the lagged
-  cross-terms of A and the factor–macro shock covariance, so that τ → 0 is
-  exactly yields-only) only gets back to yields-only accuracy, and any weight
-  on them makes forecasts worse. The full τ grid (0.01, 0.03, 0.1, 0.3) is
-  reported, and no τ beats the policy-rate model, so the choice of τ involves
-  no data snooping. **No model beats forwards significantly.** The best
-  (policy rate only) is level with them: RMSE ratio 0.98–1.04 at h = 6, 12.
-  (Numbers from the backtest rerun of 11 Nov 2026, after the PCE vintage fix
-  in §7.3; changes from the first run are ≤ 0.01.)
+  The **policy rate** adds significant information, at every maturity at
+  h = 12. Capacity utilisation and inflation do not help out of sample:
+  shrinking their links towards zero (a Minnesota-style prior on both the
+  lagged cross-terms of A and the factor–macro shock covariance, so that
+  τ → 0 is exactly yields-only) only gets back to yields-only accuracy, and
+  any weight on them makes forecasts worse. The full τ grid is reported, and
+  no τ beats the policy-rate model, so the choice of τ involves no data
+  snooping. **No model beats forwards significantly.** The best (policy
+  rate only) is level with them: RMSE ratio 0.98–1.01 at h = 6 and
+  0.95–1.00 at h = 12. (An earlier version of this table came from fits
+  where 17 of 27 τ = 0.01 refits had explosive A; see §6.3.)
 - **Why so little? Impulse responses and variance decompositions** (USD
   1985–2026, latest vintage, `notebooks/03_macro_usd.ipynb`; Cholesky order
   capacity utilisation, inflation, fed funds, level, slope, curvature; 90%
@@ -523,14 +540,50 @@ instead ask whether it beats **what the market already prices**.
   about three quarters of the fed funds rate's 12-month forecast variance
   (curvature alone half). A slope shock (short rates up relative to long)
   lowers inflation by about 10 bp over 6–24 months. In the other direction,
-  macro shocks explain only 1–11% of the factors' forecast variance at
-  1–12 months (13–33% at 5 years). An inflation shock lifts the level by
+  macro shocks explain only 1–10% of the factors' forecast variance at
+  1–12 months (12–32% at 5 years). An inflation shock lifts the level by
   about 5 bp, and activity and policy shocks move mostly the short end. So
   at forecasting horizons, what the curve does not already contain is mostly
   the policy rate, which matches the out-of-sample result. Generalised
   (order-free) responses agree on these links. A generalised fed funds shock
   raises activity and inflation, because it includes the macro news the Fed
   reacts to, which is why a recursive identification is needed.
+- **EUR and GBP (2010–2026, `notebooks/04_eur_gbp.ipynb`).** EUR is
+  estimated from 2004-09 (start of the ECB curve), GBP from 1993-01
+  (inflation targeting). EUR/GBP macro data have no vintages, so the panels
+  use release lags (§7.3). The GBP short end is evaluated at 6m: the BoE
+  published its 3m point in only 39 of the 202 months since 2010, almost all
+  in 2010–12 when Bank Rate sat at 0.5%.
+  - *EUR:* the Kalman models' RMSE is 9–63% above the random walk at
+    h = 6, 12, and forwards beat them significantly at every maturity up to
+    5y. At h = 12 the 10y forecasts ran +92 bp too high in 2010–13 and +78 bp
+    in 2014–21 (random walk: +39, +28): they revert to a level mean of
+    2.3–4.3%, which the zero/negative-rate decade never returned to. The
+    two-step VAR(1) reverts less and is the best EUR model (1–26% above the
+    random walk). The policy rate helps only one month ahead.
+  - *GBP:* the yields-only Kalman model beats the random walk at 6m
+    (0.86–0.88), is level at 1–2y and significantly worse at 10y
+    (1.13–1.18). Against forwards its ratio is 0.93–1.16, never
+    significantly below 1. Macro variables do not help.
+  - *In sample* the pattern of USD repeats: a curvature shock raises the
+    policy rate by 20–30 bp at a 15–20 month peak in all three currencies,
+    curve shocks explain 45% (EUR) to 73–76% (USD, GBP) of the policy rate's
+    12-month forecast variance, and macro shocks only 4–10% of the factors'.
+- **Cross-currency summary (common window, origins 2010-01 onwards; mean
+  RMSE ratio over 6m, 12m, 24m, 5y, 10y).**
+
+  | | USD h=6 | USD h=12 | EUR h=6 | EUR h=12 | GBP h=6 | GBP h=12 |
+  |---|---|---|---|---|---|---|
+  | Yields-only Kalman / RW | 0.95 | 0.96 | 1.26 | 1.30 | 1.02 | 1.03 |
+  | Yields-only Kalman / forwards | 1.00 | 0.99 | 1.31 | 1.28 | 1.04 | 0.99 |
+  | Two-step VAR(1) / forwards | 0.99 | 0.99 | 1.10 | 1.12 | 1.04 | 0.98 |
+  | Policy rate only / forwards | 0.98 | 0.98 | 1.33 | 1.35 | 1.09 | 1.05 |
+
+  **No model beats the forward curve significantly in any currency at 6 or
+  12 months.** The forward curve already embeds the expected policy path; a
+  statistical model that reverts to a historical mean adds error whenever
+  rates trend (EUR), and macro variables beyond the policy rate add little
+  that the curve has not already priced.
 - **Surveys (USD, optional).** Philadelphia Fed Survey of Professional
   Forecasters: quarterly 3m T-bill and 10y Treasury forecasts (free).
 - Test every model against each benchmark with Diebold–Mariano (§7.2).
@@ -682,16 +735,13 @@ premium), and that is the bar a model must clear.
    error, with EM and the exact score extended to it, impulse responses and
    variance decompositions. Rerun step 5 for it: macro vs yields-only with
    Clark–West, and against forwards with Diebold–Mariano.
-7. 🔶 **EUR and GBP.** Run steps 5 and 6 for both. GBP exercises the
-   missing-short-end handling. Cross-currency comparison. Done: backtests for
-   the standard grid (GBP estimated from 1993, inflation targeting), `cw_table`,
-   draft `notebooks/04_eur_gbp.ipynb` (GBP short end evaluated at 6m: the BoE
-   3m exists for only 39 months since 2010). The boundary issue found here is
-   resolved by fixing μ at the sample mean (§6.3); a fit that still ends on
-   the stationarity cap is optimised on the boundary surface
-   ($A = r\,B/\rho(B)$, exact gradient), which no longer triggers anywhere in
-   the grid. Remaining: regenerate notebooks 02–04 and every results table
-   with fixed μ, then the cross-currency write-up.
+7. ✅ **EUR and GBP.** Steps 5 and 6 for both, and the cross-currency
+   comparison (`notebooks/04_eur_gbp.ipynb`, §7.4). GBP is estimated from
+   1993 (inflation targeting) and evaluated at 6m at the short end (the BoE
+   3m exists for only 39 months since 2010). Along the way: estimates are
+   required to be stationary, and μ is fixed at the real-time sample mean
+   (§6.3), which made every fit well-posed and changed all Kalman results
+   (USD RMSE ratios improved by 0.01–0.07).
 8. **Trading evaluation (`src/yck/eval/trading.py`, §7.5), last, once the
    models are final.** Excess returns from the curves, carry / roll-down
    benchmark, then strategies: short-rate vs forwards first, then duration,
