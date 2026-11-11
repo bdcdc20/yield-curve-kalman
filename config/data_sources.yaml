@@ -55,6 +55,24 @@ macro:
     inflation:     {source: ons, uri: /economy/inflationandpriceindices/timeseries/d7g7/mm23, transform: level}            # CPI annual rate
     policy_rate:   {source: boe_iadb, code: IUDBEDR, transform: level}                                                     # Bank Rate
 
+# Survey expectations of long-run rates and inflation, used as shifting
+# endpoints for the level factor (README section 7.6, roadmap step 7b).
+# Quarterly; a survey counts as known from the end of month
+# `survey_known_month` of its quarter (the Philadelphia Fed SPF is published
+# mid-February/May/August/November, the ECB SPF a few weeks after its
+# January/April/July/October round), so a forecast never uses a survey
+# before it was out. There is no long free UK survey.
+survey_known_month: 2
+surveys:
+  USD:
+    # Median expected average 10-year Treasury yield over the next 10 years; first-quarter surveys, 1992-.
+    bond10: {source: spf, url: "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/data-files/files/Median_BOND10_Level.xlsx", column: BOND10}
+    # Median expected average CPI inflation over the next 10 years; every quarter, 1991Q4-.
+    cpi10:  {source: spf, url: "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/survey-of-professional-forecasters/data-files/files/Median_CPI10_Level.xlsx", column: CPI10}
+  EUR:
+    # ECB SPF longer-term (about five years ahead) HICP inflation, average of point forecasts, 1999Q1-.
+    hicp_lt: {source: ecb, flow: SPF, key: Q.U2.HICP.POINT.LT.Q.AVG}
+
 # Publication lag (months) applied to macro series that have no vintage
 # history, so that a month-t forecast only uses data released by month t.
 release_lag_months:

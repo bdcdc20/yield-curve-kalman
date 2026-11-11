@@ -159,3 +159,22 @@ def test_alfred_as_of_returns_what_was_published_then():
     assert src.as_of(v, "2020-03-01").to_dict() == {pd.Timestamp("2020-01-01"): 76.8}
     later = src.as_of(v, "2021-01-01")
     assert later.loc["2020-01-01"] == 77.0 and np.isnan(later.loc["2020-02-01"])
+
+
+# --------------------------------------------------------------------------- surveys
+def test_parse_spf_xlsx_drops_blank_quarters():
+    buf = io.BytesIO()
+    pd.DataFrame({"YEAR": [1991, 1992, 1992, 1993], "QUARTER": [4, 1, 2, 1],
+                  "BOND10": [np.nan, 7.5, np.nan, 7.0]}).to_excel(buf, index=False, sheet_name="Median_Level")
+    s = src.parse_spf_xlsx(buf.getvalue(), "BOND10")
+    assert list(s.index) == list(pd.to_datetime(["1992-01-01", "1993-01-01"]))
+    assert list(s) == [7.5, 7.0]
+
+
+def test_parse_ecb_csv_quarterly_periods():
+    text = ("KEY,FREQ,TIME_PERIOD,OBS_VALUE\n"
+            "SPF.Q.U2.HICP.POINT.LT.Q.AVG,Q,1999-Q1,1.86\n"
+            "SPF.Q.U2.HICP.POINT.LT.Q.AVG,Q,2026-Q4,2.02\n")
+    df = src.parse_ecb_csv(text)
+    assert list(df.index) == list(pd.to_datetime(["1999-01-01", "2026-10-01"]))
+    assert df["AVG"].iloc[-1] == 2.02

@@ -5,6 +5,7 @@ Outputs (data/processed/):
     curves_ext_{CCY}.parquet  same curves at every maturity the forward benchmark needs
     macro_{CCY}.parquet     monthly real_activity, inflation, policy_rate (latest vintage)
     vintages_USD.parquet    ALFRED real-time history for series with vintages: true
+    surveys_{CCY}.parquet   quarterly survey expectations (SPF), indexed by survey quarter
     coverage.md             date ranges, gaps and cross-checks for every series
 """
 from __future__ import annotations
@@ -110,6 +111,14 @@ def _fetch_macro_series(spec: dict, name: str, raw: Path, refresh: bool) -> pd.S
     raise ValueError(f"unknown macro source {s}")
 
 
+def _fetch_survey(spec: dict, name: str, raw: Path, refresh: bool) -> pd.Series:
+    if spec["source"] == "spf":
+        return src.fetch_spf(spec["url"], spec["column"], raw, refresh)
+    if spec["source"] == "ecb":
+        return src.fetch_ecb(spec["flow"], spec["key"], raw, f"ecb_{spec['flow']}_{name}.csv", refresh).iloc[:, 0]
+    raise ValueError(f"unknown survey source {spec['source']}")
+
+
 def to_monthly(s: pd.Series, transform: str, today: pd.Timestamp | None = None) -> pd.Series:
     """Month-end series (last observation of each month), optionally as % change on 12 months earlier.
 
@@ -213,6 +222,22 @@ def run(config_path: Path, data_dir: Path, only: list[str] | None = None, refres
                 pd.concat([old, df], ignore_index=True).to_parquet(vp)
                 report.append(f"- {ccy} {v}: {df['realtime_start'].nunique()} ALFRED vintages, "
                               f"first {df['realtime_start'].min():%Y-%m-%d}")
+
+    for ccy, spec in cfg.get("surveys", {}).items():
+        if only and ccy not in only:
+            continue
+        cols = {}
+        for var, s in spec.items():
+            try:
+                cols[var] = _fetch_survey(s, f"{ccy}_{var}", raw, refresh)
+            except Exception as e:
+                ok = False
+                log.error("%s survey %s failed: %s", ccy, var, e)
+                report += [f"### {ccy} survey {var} FAILED ({s})", "", "```", traceback.format_exc(limit=3), "```", ""]
+        if cols:
+            df = pd.DataFrame(cols).sort_index()
+            df.to_parquet(out / f"surveys_{ccy}.parquet")
+            report += coverage(f"{ccy} surveys (quarterly, by survey quarter)", df)
 
     for ccy in cfg["macro"]:
         p = out / f"macro_{ccy}.parquet"

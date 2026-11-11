@@ -47,7 +47,11 @@ def parse_ecb_csv(text: str) -> pd.DataFrame:
     """ECB 'csvdata' output -> wide frame, one column per series key (last key segment)."""
     df = pd.read_csv(io.StringIO(text))
     df["series"] = df["KEY"].str.split(".").str[-1]
-    df["TIME_PERIOD"] = pd.to_datetime(df["TIME_PERIOD"])
+    tp = df["TIME_PERIOD"].astype(str)
+    if tp.str.contains("-Q").all():  # quarterly series (e.g. the SPF): '2026-Q4' -> first day of the quarter
+        df["TIME_PERIOD"] = pd.PeriodIndex(tp, freq="Q").to_timestamp()
+    else:
+        df["TIME_PERIOD"] = pd.to_datetime(tp)
     wide = df.pivot_table(index="TIME_PERIOD", columns="series", values="OBS_VALUE", aggfunc="last")
     wide.index.name = "date"
     wide.columns.name = None
@@ -227,6 +231,35 @@ def fetch_ons(uri: str, raw_dir: Path, name: str, refresh: bool = False) -> pd.S
     path = fetch_to_cache(ONS_GENERATOR, raw_dir, f"ons_{name}.csv",
                           params={"format": "csv", "uri": uri}, refresh=refresh)
     return parse_ons(path.read_text(), name)
+
+
+# --------------------------------------------------------------------------- Philadelphia Fed SPF
+def parse_spf_xlsx(blob: bytes, column: str) -> pd.Series:
+    """One Philadelphia Fed SPF 'Mean_/Median_<VAR>_Level.xlsx' file -> quarterly series.
+
+    The workbook has one sheet with columns YEAR, QUARTER, <VAR>; quarters
+    without a survey answer (e.g. BOND10 is asked only in first-quarter
+    surveys) are blank and are dropped. Indexed by the first day of the
+    survey quarter; when each survey became known is decided by the user
+    (`yck.eval.endpoints.survey_endpoint`), not here.
+    """
+    import warnings
+    with warnings.catch_warnings():  # openpyxl cannot parse the files' print headers; harmless
+        warnings.simplefilter("ignore", UserWarning)
+        df = pd.read_excel(io.BytesIO(blob), sheet_name=0)
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    col = column.upper()
+    df = df.dropna(subset=["YEAR", "QUARTER", col])
+    idx = pd.PeriodIndex.from_fields(year=df["YEAR"].astype(int), quarter=df["QUARTER"].astype(int),
+                                     freq="Q").to_timestamp()
+    s = pd.Series(pd.to_numeric(df[col], errors="coerce").to_numpy(), index=idx, name=column)
+    s.index.name = "date"
+    return s.dropna().sort_index()
+
+
+def fetch_spf(url: str, column: str, raw_dir: Path, refresh: bool = False) -> pd.Series:
+    path = fetch_to_cache(url, raw_dir, f"spf_{Path(url).name}", refresh=refresh)
+    return parse_spf_xlsx(path.read_bytes(), column)
 
 
 # --------------------------------------------------------------------------- FRED / ALFRED
