@@ -46,7 +46,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 119 passed
+python3 -m pytest -q                  # expect 118 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```
