@@ -305,7 +305,15 @@ Implementation notes:
 - **Initial state:** the unconditional mean $\mu$, with the unconditional
   covariance from the discrete Lyapunov equation
   ($P_0 = A P_0 A' + Q$, `scipy.linalg.solve_discrete_lyapunov`).
-  If $A$ is not stable, fall back to a diffuse prior (large $P_0$).
+  If $A$ is not stable, the filter falls back to a diffuse prior (large
+  $P_0$) so that any trial value can be evaluated. That fallback makes the
+  likelihood jump *up* at the unit circle, and on short or trending samples
+  the optimiser used to stop at explosive $A$ (USD shrinkage models, EUR,
+  GBP). Estimates are therefore required to be stationary: the search runs
+  unrestricted, and a run that ends explosive is redone with explosive values
+  rejected (`statespace_dns._fit_from`). Where the data want a unit root
+  (GBP Bank Rate 1993–2012) the estimate sits at the cap (spectral radius
+  0.9999), and that repair is not yet reliable (open issue, §8).
 - **Missing data:** at each $t$, keep only the rows of $y_t$, $\Lambda$ and
   $H$ for observed maturities; skip the update entirely if none are
   observed. This is how the GBP short-end gaps are handled.
@@ -464,6 +472,10 @@ instead ask whether it beats **what the market already prices**.
   information helps the short end when the model is small enough to
   estimate it.
 - **Restricted and shrunk macro models (USD, Kalman, real-time macro, h = 6 / 12).**
+  *Superseded (11 Nov 2026):* 17 of the 27 τ = 0.01 refits behind the shrinkage
+  rows below had explosive A (§6.3). These rows will be replaced by the rerun
+  with stationary estimates; the yields-only, full-macro and policy-rate rows
+  are unaffected.
 
   | vs yields-only Kalman (Clark–West p) | 3m | 12m | 24m | 5y | 10y |
   |---|---|---|---|---|---|
@@ -598,6 +610,28 @@ premium), and that is the bar a model must clear.
    | Two-step refits per origin | O(t) each | O(1) each | Prefix sums of the regression cross-products (sliding window for rolling) |
    | USD backtest, yields-only λ fixed / λ est. / macro | 291 s / 622 s / 1,300 s | 21 s / 37 s / 104 s | All of the above; yields-only log-likelihoods within 0.001 of before, macro within 0.08 |
    and seconds from the cache.
+4d. ✅ **Second performance pass** (11 Nov 2026; profiled first, every change
+   checked against the previous outputs). The whole standard grid (USD, EUR,
+   GBP x yields only with both λ, full macro, policy rate only, four
+   shrinkage τ: 24 backtests, 488 refits) took **1,238 s** of fitting run as 24
+   separate commands; it now takes **~250 s** end to end with
+   `python -m yck backtest --ccy USD EUR GBP --all`, with bit-identical
+   outputs. Profiling showed 87–89% of each fit inside the filter/smoother
+   pass, and the predicted covariance converging within ~4 months.
+
+   | | Before | After | How |
+   |---|---|---|---|
+   | Filter + smoother + statistics, yields only / macro | 2.31 / 3.58 ms | 0.16 / 0.36 ms | **Steady state:** P_{t\|t-1} does not depend on the data, so once it stops changing (same observation pattern) the filter reuses P, its inverse and log-determinants, and the smoother reuses its gain and, once converged, P_{t\|T}; any change in the missing pattern recomputes. **No temporaries:** k ≤ 6 algebra written as loops into preallocated buffers (allocation cost more than the arithmetic). **Statistics:** each series' Σ E[xx'] is the total minus its missing months, O(N k²) instead of O(N n k²) |
+   | Lyapunov solve (stationary prior, adjoint in the score) | scipy, ~100 µs | compiled, same direct method | 8,000 calls per macro fit |
+   | Model rebuilt in the score | twice per evaluation | once | passed from the objective |
+   | Scheduling | one pool and one barrier per backtest | one pool for all refits, longest first (LPT) | `prefit`, `--all` |
+   | Real-time macro panels | rebuilt per call | memoised by origin | shared by refits, forecasts and variants |
+   | Full grid, fitting / planning + forecasts | 1,238 s / ~50 s | 244 s / 10 s | all of the above |
+
+   Tested and rejected: finishing only one scout per likelihood basin (14%
+   faster, but lost 0.2–0.6 log-likelihood points on the flat macro ridges);
+   single-threaded BLAS in the workers (no effect). The remaining limit is
+   hardware: on an M1 four of the eight workers run on efficiency cores.
 5. **Benchmarks and tests (`src/yck/eval/`):** forward-rate panel in the
    data pipeline and forward benchmark (§7.4), optional SPF survey,
    Diebold–Mariano and Clark–West tests (§7.2), results tables (CSV +
@@ -616,8 +650,16 @@ premium), and that is the bar a model must clear.
    error, with EM and the exact score extended to it, impulse responses and
    variance decompositions. Rerun step 5 for it: macro vs yields-only with
    Clark–West, and against forwards with Diebold–Mariano.
-7. **EUR and GBP.** Run steps 5 and 6 for both. GBP exercises the
-   missing-short-end handling. Cross-currency comparison.
+7. 🔶 **EUR and GBP.** Run steps 5 and 6 for both. GBP exercises the
+   missing-short-end handling. Cross-currency comparison. Done: backtests for
+   the standard grid (GBP estimated from 1993, inflation targeting), `cw_table`,
+   draft `notebooks/04_eur_gbp.ipynb` (GBP short end evaluated at 6m: the BoE
+   3m exists for only 39 months since 2010). **Open issue before results:**
+   where the stationary optimum sits on the radius cap (GBP policy rate, some
+   shrunk fits), the restricted re-run lands at different points from
+   different starts (log-likelihood spread of ~250 on GBP 2012-01); it needs
+   a proper constrained optimisation on the boundary, or a decision to allow
+   a unit root.
 8. **Trading evaluation (`src/yck/eval/trading.py`, §7.5), last, once the
    models are final.** Excess returns from the curves, carry / roll-down
    benchmark, then strategies: short-rate vs forwards first, then duration,
