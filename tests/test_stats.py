@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from yck.eval.stats import clark_west, diebold_mariano, dm_table, newey_west_var_of_mean
+from yck.eval.stats import clark_west, cw_table, diebold_mariano, dm_table, newey_west_var_of_mean
 
 
 def test_newey_west_by_hand():
@@ -76,3 +76,18 @@ def test_dm_table_layout_and_ratio():
     assert list(t.index) == ["3m", "120m"]
     assert t.loc["3m", ("M", "ratio")] == pytest.approx(0.5)
     assert t.loc["3m", ("M", "cell")].startswith("0.50")
+
+
+def test_cw_table_matches_clark_west_on_the_common_sample():
+    idx = pd.date_range("2000-01-31", periods=60, freq="ME")
+    rng = np.random.default_rng(4)
+    actual = pd.DataFrame({"3m": rng.normal(size=60), "120m": rng.normal(size=60)}, index=idx)
+    small = actual + rng.normal(scale=1.0, size=(60, 2))
+    large = actual + rng.normal(scale=0.5, size=(60, 2))
+    large.iloc[:5, 0] = np.nan  # dropped for every model at 3m
+    t = cw_table({"S": small, "L": large}, "S", actual, h=1)
+    ok = large["3m"].notna()
+    ref = clark_west((small - actual)["3m"][ok], (large - actual)["3m"][ok], small["3m"][ok], large["3m"][ok], 1)
+    assert t.loc["3m", ("L", "cw")] == pytest.approx(ref["stat"])
+    assert t.loc["3m", ("L", "ratio")] < 1 and t.loc["3m", ("L", "cell")].endswith("***")
+    assert ("S", "ratio") not in t.columns

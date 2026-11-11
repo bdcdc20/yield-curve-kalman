@@ -47,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
                    choices=["real_activity", "inflation", "policy_rate"], help="macro variables to include")
     b.add_argument("--shrink", type=float, nargs="*", default=[None],
                    help="shrinkage tau(s) for the factor<->macro cross terms (yields + macro only)")
+    b.add_argument("--all", action="store_true",
+                   help="the standard grid for every --ccy: yields only (both lambda), full macro, policy rate "
+                        "only, shrinkage 0.01-0.3; all refits share one pool, longest first")
     b.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
     b.add_argument("--data-dir", type=Path, default=ROOT / "data")
     a = p.parse_args(argv)
@@ -74,7 +77,16 @@ def main(argv: list[str] | None = None) -> int:
 
 # Defaults from README section 7.1: USD forecasts from 2000 (ALFRED vintages);
 # EUR and GBP from 2010, so EUR has at least 5 years of estimation data.
-_BACKTEST_DEFAULTS = {"USD": ("1985-01-31", "2000-01-31"), "EUR": (None, "2010-01-31"), "GBP": ("1985-01-31", "2010-01-31")}
+# GBP estimation starts in 1993, with inflation targeting (Oct 1992): from 1985
+# the Bank Rate disinflation pushes A to a unit root, where the stationary prior
+# breaks down (README section 7.4), and UK CPI only starts in 1989 anyway.
+_BACKTEST_DEFAULTS = {"USD": ("1985-01-31", "2000-01-31"), "EUR": (None, "2010-01-31"), "GBP": ("1993-01-31", "2010-01-31")}
+
+
+ALL_VARS = ("real_activity", "inflation", "policy_rate")
+STANDARD_GRID = (  # (macro variables or None, lambda mode, shrinkage tau): what README section 7.4 reports
+    [(None, "fixed", None), (None, "est", None), (ALL_VARS, "fixed", None), (("policy_rate",), "fixed", None)]
+    + [(ALL_VARS, "fixed", tau) for tau in (0.01, 0.03, 0.1, 0.3)])
 
 
 def _backtest(a) -> int:
@@ -83,35 +95,54 @@ def _backtest(a) -> int:
 
     import pandas as pd
     from .data.realtime import RealTimeMacro
-    from .eval.backtest import dns_kalman_forecasts
+    from .eval.backtest import dns_kalman_forecasts, prefit
 
     jobs = a.jobs or os.cpu_count() or 1
     out_dir = a.data_dir / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = None if a.no_cache else out_dir / "cache"
     floor = a.floor or None
+    if a.all:
+        grid = STANDARD_GRID
+    else:
+        grid = [(tuple(a.macro_vars) if a.macro else None, l, t) for l in a.lam for t in a.shrink]
+
+    # 1. Plan every backtest (currency x model variant).
+    runs = []
     for ccy in a.ccy:
         est_start, first_origin = _BACKTEST_DEFAULTS[ccy]
         est_start, first_origin = a.est_start or est_start, a.first_origin or first_origin
         y = pd.read_parquet(a.data_dir / "processed" / f"curves_{ccy}.parquet")
-        macro = RealTimeMacro.load(ccy, a.data_dir, a.config, a.macro_vars) if a.macro else None
-        all_vars = len(a.macro_vars) == 3
-        mtag = ("macro_" if all_vars else "macro-" + "+".join(a.macro_vars) + "_") if a.macro else ""
-        for lam_mode, tau in [(l, t) for l in a.lam for t in a.shrink]:
-            tag = mtag + (f"shrink{tau:g}_" if tau is not None else "") + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
-            print(f"== {ccy} {tag}: estimation from {est_start or 'start'}, origins from {first_origin}, "
-                  f"{a.starts} starts, {jobs} jobs", flush=True)
-            fits, t0 = [], time.perf_counter()
-            fc = dns_kalman_forecasts(y, est_start=est_start, first_origin=first_origin, reestimate_every=a.every,
-                                      estimate_lambda=lam_mode == "est", h_floor_bp=floor, n_starts=a.starts,
-                                      jobs=jobs, cache_dir=None if a.no_cache else out_dir / "cache",
-                                      fits=fits, verbose=True, macro=macro, shrink_tau=tau)
-            for h, df in fc.items():
-                df.to_parquet(out_dir / f"fc_{ccy}_kalman_{tag}_h{h}.parquet")
-            pd.DataFrame([{"origin": t, "loglik": f.loglik, "lam": f.params.lam, "converged": f.converged,
-                           **{f"A{i}{j}": f.params.A[i, j] for i in range(f.params.k) for j in range(f.params.k)},
-                           **{f"mu{i}": f.params.mu[i] for i in range(f.params.k)}}
-                          for t, f in fits]).to_csv(out_dir / f"params_{ccy}_kalman_{tag}.csv", index=False)
-            print(f"   done in {time.perf_counter() - t0:.0f}s -> {out_dir}", flush=True)
+        macros = {}
+        for mvars, lam_mode, tau in grid:
+            if mvars is not None and mvars not in macros:
+                macros[mvars] = RealTimeMacro.load(ccy, a.data_dir, a.config, mvars)
+            mtag = "" if mvars is None else ("macro_" if len(mvars) == 3 else "macro-" + "+".join(mvars) + "_")
+            tag = (mtag + (f"shrink{tau:g}_" if tau is not None else "")
+                   + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor"))
+            runs.append((ccy, tag, dict(yields=y, est_start=est_start, first_origin=first_origin,
+                                        reestimate_every=a.every, estimate_lambda=lam_mode == "est",
+                                        h_floor_bp=floor, n_starts=a.starts, macro=macros.get(mvars),
+                                        shrink_tau=tau)))
+
+    # 2. All their re-estimations in one pool, longest first (skipped without a cache).
+    t_all = time.perf_counter()
+    if cache_dir is not None:
+        print(f"== {len(runs)} backtests ({', '.join(a.ccy)}): estimating all refits", flush=True)
+        prefit([kw for _, _, kw in runs], jobs, cache_dir, verbose=True)
+
+    # 3. Forecasts, from the cached fits.
+    for ccy, tag, kw in runs:
+        fits, t0 = [], time.perf_counter()
+        fc = dns_kalman_forecasts(**kw, jobs=1 if cache_dir is not None else jobs, cache_dir=cache_dir, fits=fits)
+        for h, df in fc.items():
+            df.to_parquet(out_dir / f"fc_{ccy}_kalman_{tag}_h{h}.parquet")
+        pd.DataFrame([{"origin": t, "loglik": f.loglik, "lam": f.params.lam, "converged": f.converged,
+                       **{f"A{i}{j}": f.params.A[i, j] for i in range(f.params.k) for j in range(f.params.k)},
+                       **{f"mu{i}": f.params.mu[i] for i in range(f.params.k)}}
+                      for t, f in fits]).to_csv(out_dir / f"params_{ccy}_kalman_{tag}.csv", index=False)
+        print(f"   {ccy} {tag}: {len(fits)} fits, forecasts in {time.perf_counter() - t0:.1f}s", flush=True)
+    print(f"== all done in {time.perf_counter() - t_all:.0f}s -> {out_dir}", flush=True)
     return 0
 
 

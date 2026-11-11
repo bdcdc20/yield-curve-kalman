@@ -71,7 +71,7 @@ def dns_two_step_forecasts(
     }
 
 
-FIT_CACHE_VERSION = 4  # bump when the estimator changes, so cached fits are not reused
+FIT_CACHE_VERSION = 10  # bump when the estimator changes, so cached fits are not reused
 
 
 def _cache_key(sample: pd.DataFrame, settings: dict) -> str:
@@ -107,6 +107,71 @@ def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> 
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(_fit_to_json(fit)))
     return fit
+
+
+def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lambda, lam, h_floor_bp, n_starts,
+                macro, shrink_tau):
+    """What a Kalman backtest re-estimates: (y, origins, refit dates, fit settings, panel function)."""
+    y = yields.loc[est_start:] if est_start else yields
+    origins = y.loc[first_origin:].index
+    refit_at = list(origins[::reestimate_every])
+    settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
+    if shrink_tau is not None:
+        settings["shrink_tau"] = shrink_tau  # only added when used, so existing cache keys stay valid
+
+    def panel(t):
+        """Everything a forecaster had at origin t."""
+        if macro is None:
+            return y.loc[:t]
+        return pd.concat([y.loc[:t], macro.at(t, index=y.index)], axis=1)
+
+    return y, origins, refit_at, settings, panel
+
+
+def _fit_cost(sample: pd.DataFrame, settings: dict) -> float:
+    """Rough relative cost of one re-estimation: months x states^2, more with lambda or shrinkage."""
+    k = 3 + sum(1 for c in sample.columns if not str(c).endswith("m"))
+    return len(sample) * k * k * (1.5 if settings.get("estimate_lambda") else 1.0) * (
+        1.5 if "shrink_tau" in settings else 1.0)
+
+
+def prefit(specs: list[dict], jobs: int, cache_dir: str | Path, verbose: bool = False) -> int:
+    """Estimate every re-estimation of several backtests in one process pool, longest first.
+
+    `specs` are keyword-argument dicts for `dns_kalman_forecasts`. Running the
+    backtests one by one starts a pool per backtest and waits for each one's
+    slowest refit, so cores sit idle at every barrier. Here all refits of all
+    specs (currencies, model variants) form one queue, already-cached fits are
+    skipped, and the rest are dispatched longest-processing-time first (the
+    LPT greedy rule): big USD macro fits start first and short ones fill the
+    gaps at the end. Fits land in the cache, so the backtests themselves then
+    run from it. Returns the number of fits computed.
+    """
+    tasks, seen = [], set()
+    for spec in specs:
+        kw = {k: v for k, v in spec.items() if k in ("first_origin", "est_start", "reestimate_every",
+                                                      "estimate_lambda", "lam", "h_floor_bp", "n_starts",
+                                                      "macro", "shrink_tau")}
+        full = {"first_origin": "2000-01-31", "est_start": None, "reestimate_every": 12, "estimate_lambda": False,
+                "lam": DL_LAMBDA, "h_floor_bp": 1.0, "n_starts": 6, "macro": None, "shrink_tau": None, **kw}
+        _, _, refit_at, settings, panel = _refit_plan(spec["yields"], **full)
+        for t in refit_at:
+            sample = panel(t)
+            key = _cache_key(sample, settings)
+            if key in seen or (Path(cache_dir) / f"{key}.json").exists():
+                continue
+            seen.add(key)
+            tasks.append((_fit_cost(sample, settings), sample, settings))
+    tasks.sort(key=lambda x: -x[0])
+    t0 = time.perf_counter()
+    if tasks:
+        with ProcessPoolExecutor(max_workers=max(1, jobs)) as ex:
+            list(ex.map(_fit_origin, [s for _, s, _ in tasks], [st for _, _, st in tasks],
+                        [str(cache_dir)] * len(tasks)))
+    if verbose:
+        print(f"prefit: {len(tasks)} fits in {time.perf_counter() - t0:.0f}s wall time ({jobs} jobs, longest first)",
+              flush=True)
+    return len(tasks)
 
 
 def dns_kalman_forecasts(
@@ -155,20 +220,9 @@ def dns_kalman_forecasts(
 
     If `fits` is a list, each (origin, DNSFit) is appended to it.
     """
-    y = yields.loc[est_start:] if est_start else yields
-    origins = y.loc[first_origin:].index
-    refit_at = list(origins[::reestimate_every])
-    settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
-    if shrink_tau is not None:
-        settings["shrink_tau"] = shrink_tau  # only added when used, so existing cache keys stay valid
+    y, origins, refit_at, settings, panel = _refit_plan(yields, first_origin, est_start, reestimate_every,
+                                                        estimate_lambda, lam, h_floor_bp, n_starts, macro, shrink_tau)
     cache = str(cache_dir) if cache_dir else None
-
-    def panel(t):
-        """Everything a forecaster had at origin t."""
-        if macro is None:
-            return y.loc[:t]
-        return pd.concat([y.loc[:t], macro.at(t, index=y.index)], axis=1)
-
     samples = [panel(t) for t in refit_at]
 
     t0 = time.perf_counter()

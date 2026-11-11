@@ -102,3 +102,12 @@ def test_withdrawn_history_falls_back_to_last_complete_vintage():
     assert during.loc["2001-02-28"] == pytest.approx(100 * (1.005**12 - 1))  # the vintage of 2001-04-19
     assert during.index[-1] == pd.Timestamp("2001-03-31")  # March was printed on 2001-04-15, before the gap
     assert rt.at("2001-05-31")["inflation"].dropna().index[-1] == pd.Timestamp("2001-04-30")
+
+
+def test_repeated_origins_are_memoised_and_safe_to_modify():
+    rt = RealTimeMacro(_latest(), SPECS, LAGS, _vintages())
+    first = rt.at("2001-03-31")
+    first.iloc[:, :] = -999.0  # a caller modifying its copy must not change later answers
+    again = rt.at("2001-03-31")
+    assert len(rt._memo) == 1 and (again != -999.0).all().all()
+    assert again.loc["2001-02-28", "real_activity"] == 80.0 + 13

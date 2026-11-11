@@ -62,6 +62,7 @@ class RealTimeMacro:
         if unknown:
             raise ValueError(f"unknown macro variables {sorted(unknown)}; choose from {VARIABLES}")
         self.latest = latest[list(self.variables)]
+        self._memo: dict[pd.Timestamp, pd.DataFrame] = {}  # origin -> panel; vintage lookups are the slow part
         self.specs = specs
         self.release_lag = release_lag
         self.vintages = {}
@@ -98,11 +99,12 @@ class RealTimeMacro:
     def at(self, origin, index: pd.DatetimeIndex | None = None) -> pd.DataFrame:
         """Macro panel as known at month-end `origin`, reindexed to `index` (NaN = not yet known)."""
         origin = pd.Timestamp(origin)
-        cols = {}
-        for var in self.variables:
-            cols[var] = self._from_vintage(var, origin) if var in self.vintages else self._lagged_latest(var, origin)
-        out = pd.DataFrame(cols)
-        out = out.loc[:origin]
+        if origin not in self._memo:  # backtests ask for the same origins many times (refits, forecasts, variants)
+            cols = {}
+            for var in self.variables:
+                cols[var] = self._from_vintage(var, origin) if var in self.vintages else self._lagged_latest(var, origin)
+            self._memo[origin] = pd.DataFrame(cols).loc[:origin]
+        out = self._memo[origin].copy()
         if index is not None:
             out = out.reindex(index[index <= origin])
         return out

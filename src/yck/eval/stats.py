@@ -132,3 +132,40 @@ def dm_table(forecasts: dict[str, pd.DataFrame], benchmark: str, actual: pd.Data
     out = pd.DataFrame(rows).T
     out.columns = pd.MultiIndex.from_tuples(out.columns)
     return out
+
+
+def cw_table(forecasts: dict[str, pd.DataFrame], small: str, actual: pd.DataFrame, h: int,
+             columns=None) -> pd.DataFrame:
+    """RMSE ratio vs the nested `small` model and Clark-West test for every larger model and maturity.
+
+    Same layout as `dm_table` (columns `ratio`, `cw`, `p`, `cell`), on a common
+    sample. Stars mark a one-sided rejection in favour of the larger model at
+    10/5/1%. Every other model in `forecasts` must nest `small`.
+    """
+    columns = list(columns or actual.columns)
+    idx = actual.index
+    for f in forecasts.values():
+        idx = idx.intersection(f.index)
+    a = actual.loc[idx, columns]
+    mask = a.notna()
+    for f in forecasts.values():
+        mask &= f.loc[idx, columns].notna()
+    fc = {n: f.loc[idx, columns].where(mask) for n, f in forecasts.items()}
+    rows = {}
+    for col in columns:
+        fs = fc[small][col]
+        es = fs - a[col]
+        row = {}
+        for n in forecasts:
+            if n == small:
+                continue
+            fl = fc[n][col]
+            el = fl - a[col]
+            ratio = np.sqrt((el**2).mean() / (es**2).mean())
+            cw = clark_west(es, el, fs, fl, h)
+            row[(n, "ratio")], row[(n, "cw")], row[(n, "p")] = ratio, cw["stat"], cw["pvalue"]
+            row[(n, "cell")] = f"{ratio:.2f}{_stars(cw['pvalue'])}"
+        rows[col] = row
+    out = pd.DataFrame(rows).T
+    out.columns = pd.MultiIndex.from_tuples(out.columns)
+    return out
