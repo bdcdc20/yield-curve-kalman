@@ -817,6 +817,34 @@ literature, not results from this project.
    | 7 | Macro factors instead of single series | 3 | One or two factors from a large public macro panel per currency, entering like the policy rate | Uncertain after 2008 | Medium–high |
    | 8 | Better cross-sectional fit | 1 | Second slope/curvature factor (dynamic Svensson) or time-varying λ | Lower 3m and 10y noise; overlaps with #1 | Medium |
 
+   **Grid for items 1–2, fixed on 11 Nov 2026 before any of it was run**
+   (`eval/grid.py: accuracy_grid`; `python -m yck backtest --ccy USD EUR GBP --accuracy`):
+
+   - Models: yields only and yields + policy rate (λ fixed, no shrinkage),
+     the two best of step 7.
+   - Endpoint for the level (`model/adjust.py`): none; `ewma` (one-sided
+     exponential smoothing of the two-step level factor, α = 0.1, all
+     currencies); `bond10` (SPF median expected 10-year average 10y yield,
+     USD); `cpi10` (SPF median 10-year CPI inflation, USD); `hicp_lt` (ECB
+     SPF longer-term HICP, EUR). Implemented by detrending: the endpoint is
+     subtracted from every yield and from the policy rate, the model is
+     estimated and filtered as before with μ at the real-time sample mean
+     (for an inflation endpoint μ_level is then the average real rate plus
+     term premium), and the origin's endpoint is added back, held flat. A
+     survey counts as known from the end of the second month of its quarter.
+     Survey variants start their estimation sample at the first survey
+     (USD: Nov 1991 / Feb 1992); forecast origins are unchanged.
+   - Measurement errors: none; `ar1` (ρʰeₜ); `ar1c` (m + ρʰ(eₜ − m), Raviv
+     2013), fitted per maturity at each origin on the filtered residuals up
+     to the origin, ρ clipped to ±0.99.
+   - 24 USD, 18 EUR and 12 GBP backtests; each is reported, against the
+     random walk and forwards (DM), against its plain version (CW for the
+     error models, which nest it; DM for endpoints, which do not), and in a
+     90% model confidence set (Hansen, Lunde & Nason 2011, `eval/stats.py:
+     mcs`, squared-error loss, block bootstrap with blocks of max(h, 3)
+     months) over every model in the step 7 and 7b grids plus the random
+     walk, forwards and the two-step model.
+
    Fixing failures 1 and 2 also matters for step 8: the trading signal is
    F − ŷ, and the level bias would keep the strategy short duration through
    the 2000–2015 and 2010–2021 rallies.

@@ -6,6 +6,9 @@ process pool, longest first (`backtest.prefit`), then writes each backtest's
 forecasts and parameters from the fit cache. `ensure_results` does that only
 for currencies whose result files are missing, so a notebook on a fresh clone
 triggers one ~1.5 min run instead of a pool per backtest.
+
+`accuracy_grid` is the roadmap step 7b grid (shifting endpoints x AR(1)
+measurement errors on the two best models), fixed before it was run.
 """
 from __future__ import annotations
 
@@ -14,9 +17,11 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from yck.data.realtime import RealTimeMacro
 from yck.eval.backtest import dns_kalman_forecasts, prefit
+from yck.model.adjust import ewma_endpoint, survey_endpoint
 
 # USD forecasts from 2000 (ALFRED vintages); EUR and GBP from 2010, so EUR has at
 # least 5 years of estimation data. GBP estimation starts in 1993 with inflation
@@ -29,12 +34,40 @@ STANDARD_GRID = (  # (macro variables or None, lambda mode, shrinkage tau): what
     + [(ALL_VARS, "fixed", tau) for tau in (0.01, 0.03, 0.1, 0.3)])
 HORIZONS = (1, 6, 12)
 
+# Roadmap step 7b (README sections 7.6 and 8), fixed before any of it was run: the two best models so far,
+# each with every endpoint available for the currency and every measurement-error model. All are reported.
+ACCURACY_MODELS = (None, ("policy_rate",))  # yields only; yields + policy rate (lambda fixed, no shrinkage)
+ENDPOINTS = {"USD": (None, "ewma", "bond10", "cpi10"), "EUR": (None, "ewma", "hicp_lt"), "GBP": (None, "ewma")}
+ERROR_MODELS = (None, "ar1", "ar1c")
 
-def run_tag(mvars, lam_mode: str, tau, floor=1.0) -> str:
-    """File tag of one backtest, e.g. 'macro-policy_rate_lamfixed' (fc_{CCY}_kalman_{tag}_h{h}.parquet)."""
+
+def accuracy_grid(ccy: str) -> list[tuple]:
+    """Step 7b grid for one currency: (macro vars, lambda mode, tau, endpoint, error model) tuples."""
+    return [(m, "fixed", None, e, err) for m in ACCURACY_MODELS for e in ENDPOINTS[ccy] for err in ERROR_MODELS]
+
+
+def run_tag(mvars, lam_mode: str, tau, floor=1.0, endpoint=None, error_ar=None) -> str:
+    """File tag of one backtest, e.g. 'macro-policy_rate_ep-ewma_lamfixed_err-ar1c'
+    (fc_{CCY}_kalman_{tag}_h{h}.parquet). Without an endpoint or error model the tags are those of step 7."""
     mtag = "" if mvars is None else ("macro_" if len(mvars) == 3 else "macro-" + "+".join(mvars) + "_")
-    return (mtag + (f"shrink{tau:g}_" if tau is not None else "")
-            + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor"))
+    return (mtag + (f"shrink{tau:g}_" if tau is not None else "") + (f"ep-{endpoint}_" if endpoint else "")
+            + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
+            + (f"_err-{error_ar}" if error_ar else ""))
+
+
+def load_endpoint(name: str, ccy: str, yields: pd.DataFrame, data_dir: Path, config: Path) -> pd.Series:
+    """Real-time endpoint series on the curve's months: 'ewma', or a survey column of surveys_{CCY}.parquet."""
+    if name == "ewma":
+        return ewma_endpoint(yields)
+    survey = pd.read_parquet(Path(data_dir) / "processed" / f"surveys_{ccy}.parquet")[name]
+    known = yaml.safe_load(Path(config).read_text()).get("survey_known_month", 2)
+    return survey_endpoint(survey, yields.index, known)
+
+
+def _grid_for(grid, ccy: str) -> list[tuple]:
+    """Grid entries as 5-tuples; `grid` is a list of 3- or 5-tuples, or a function of the currency."""
+    rows = grid(ccy) if callable(grid) else grid
+    return [tuple(r) + (None,) * (5 - len(r)) for r in rows]
 
 
 def plan_runs(ccys, data_dir: Path, config: Path, grid=STANDARD_GRID, est_start=None, first_origin=None,
@@ -45,14 +78,16 @@ def plan_runs(ccys, data_dir: Path, config: Path, grid=STANDARD_GRID, est_start=
         start_default, origin_default = BACKTEST_DEFAULTS[ccy]
         es, fo = est_start or start_default, first_origin or origin_default
         y = pd.read_parquet(Path(data_dir) / "processed" / f"curves_{ccy}.parquet")
-        macros = {}  # one panel builder per variable set, shared by its variants (memoised by origin)
-        for mvars, lam_mode, tau in grid:
+        macros, endpoints = {}, {}  # built once per currency, shared by the variants (macro panels memoised)
+        for mvars, lam_mode, tau, ep, err in _grid_for(grid, ccy):
             if mvars is not None and mvars not in macros:
                 macros[mvars] = RealTimeMacro.load(ccy, data_dir, config, mvars)
-            runs.append((ccy, run_tag(mvars, lam_mode, tau, floor),
+            if ep is not None and ep not in endpoints:
+                endpoints[ep] = load_endpoint(ep, ccy, y, data_dir, config)
+            runs.append((ccy, run_tag(mvars, lam_mode, tau, floor, ep, err),
                          dict(yields=y, est_start=es, first_origin=fo, reestimate_every=every,
                               estimate_lambda=lam_mode == "est", h_floor_bp=floor, n_starts=starts,
-                              macro=macros.get(mvars), shrink_tau=tau)))
+                              macro=macros.get(mvars), shrink_tau=tau, endpoint=endpoints.get(ep), error_ar=err)))
     return runs
 
 
@@ -86,11 +121,11 @@ def run_grid(ccys, data_dir: Path, config: Path, jobs: int | None = None, use_ca
         print(f"== all done in {time.perf_counter() - t_all:.0f}s -> {out_dir}", flush=True)
 
 
-def ensure_results(ccys, data_dir: Path, config: Path, jobs: int | None = None) -> None:
-    """Run the standard grid for every currency in `ccys` whose result files are not all present."""
+def ensure_results(ccys, data_dir: Path, config: Path, jobs: int | None = None, grid=STANDARD_GRID) -> None:
+    """Run `grid` (default: the standard grid) for every currency in `ccys` whose result files are not all present."""
     out_dir = Path(data_dir) / "results"
     missing = [c for c in ccys
-               if not all((out_dir / f"fc_{c}_kalman_{run_tag(m, l, t)}_h{h}.parquet").exists()
-                          for m, l, t in STANDARD_GRID for h in HORIZONS)]
+               if not all((out_dir / f"fc_{c}_kalman_{run_tag(*r[:3], 1.0, *r[3:])}_h{h}.parquet").exists()
+                          for r in _grid_for(grid, c) for h in HORIZONS)]
     if missing:
-        run_grid(missing, data_dir, config, jobs=jobs)
+        run_grid(missing, data_dir, config, jobs=jobs, grid=grid)
