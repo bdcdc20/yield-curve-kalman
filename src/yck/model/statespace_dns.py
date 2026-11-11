@@ -80,6 +80,34 @@ def spectral_radius(A: np.ndarray) -> float:
     return float(np.max(np.abs(np.linalg.eigvals(A))))
 
 
+BOUNDARY_RADIUS = MAX_RADIUS * (1.0 - 1e-9)  # "on the cap", just inside the rejection test
+
+
+def radius_gradient(B: np.ndarray) -> np.ndarray:
+    """d rho(B) / dB for the spectral radius, assuming a simple dominant eigenvalue (or complex pair).
+
+    With B = V diag(w) V^{-1}, the rows y of V^{-1} are left eigenvectors
+    normalised so y'v = 1, and first-order perturbation gives
+    d lambda = y' dB v. For rho = |lambda|, d rho = Re(conj(lambda) d lambda) / |lambda|.
+    A complex pair gives the same real result from either member.
+    """
+    w, V = np.linalg.eig(B)
+    i = int(np.argmax(np.abs(w)))
+    y = np.linalg.inv(V)[i]
+    return np.real(np.conj(w[i]) / np.abs(w[i]) * np.outer(y, V[:, i]))
+
+
+def boundary_chain(gA: np.ndarray, B: np.ndarray, radius: float = BOUNDARY_RADIUS) -> np.ndarray:
+    """Gradient w.r.t. B of a function of A = radius * B / rho(B), given its gradient gA w.r.t. A.
+
+    dA = (c / rho) dB - (c / rho^2) B d rho, so
+    df/dB = (c / rho) gA - (c / rho^2) <gA, B> d rho / dB. The result is orthogonal
+    to B (scaling B does not move A), by Euler's identity <d rho / dB, B> = rho.
+    """
+    r = spectral_radius(B)
+    return (radius / r) * gA - (radius / r**2) * np.sum(gA * B) * radius_gradient(B)
+
+
 def split_columns(columns) -> tuple[list, list]:
     """(yield columns, macro columns): yields are labelled like '24m', everything else is macro."""
     ycols = [c for c in columns if re.fullmatch(r"\d+(?:\.\d+)?m", str(c))]
@@ -162,6 +190,19 @@ def two_step_start(data: pd.DataFrame, lam: float = DL_LAMBDA) -> DNSParams:
     return DNSParams(mu=dyn.mu, A=dyn.A, Q=dyn.Q, h=h, lam=lam)
 
 
+def sample_mean(data: pd.DataFrame, lam: float = DL_LAMBDA) -> np.ndarray:
+    """Sample mean of the states: the month-by-month OLS factors (step 1 of Diebold-Li) and the observed macro series.
+
+    Used as the fixed long-run mean mu (`fit_dns_mle(mu="sample")`). It uses only
+    the rows of `data`, so in a backtest it is the mean of what was known at
+    the origin.
+    """
+    ycols, mcols = split_columns(data.columns)
+    f = fit_factors(data[ycols], lam)
+    means = [f[c].mean() for c in f.columns] + [data[c].mean() for c in mcols]
+    return np.asarray(means, float)
+
+
 @dataclass
 class DNSFit:
     params: DNSParams
@@ -174,6 +215,7 @@ class DNSFit:
     columns: list  # yield columns, then macro columns
     estimate_lambda: bool
     penalty: float = 0.0  # log prior of the shrinkage (<= 0); loglik excludes it
+    mu_fixed: bool = False  # mu set to the sample mean rather than estimated
 
     @property
     def aic(self) -> float:
@@ -342,7 +384,8 @@ def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: flo
     return np.concatenate(parts)
 
 
-def em_update(p: DNSParams, st: SmootherStats, tau, h_min: float = 1e-10) -> DNSParams:
+def em_update(p: DNSParams, st: SmootherStats, tau, h_min: float = 1e-10,
+              mu_fixed: np.ndarray | None = None) -> DNSParams:
     """One EM M-step: closed-form A, mu, Q, H given the smoother statistics (lambda unchanged).
 
     The transition is a regression of x_t on (1, x_{t-1}) in expectation:
@@ -352,14 +395,28 @@ def em_update(p: DNSParams, st: SmootherStats, tau, h_min: float = 1e-10) -> DNS
     gradient phase that follows maximises the exact likelihood.
     """
     n, k = len(tau), p.k
-    B = np.linalg.solve(st.S00.T, st.S10.T).T
-    c, A = B[:, 0], B[:, 1:]
-    Q = (st.S11 - B @ st.S10.T) / st.n_trans
+    if mu_fixed is None:
+        B = np.linalg.solve(st.S00.T, st.S10.T).T
+        c, A = B[:, 0], B[:, 1:]
+        Q = (st.S11 - B @ st.S10.T) / st.n_trans
+    else:
+        # mu known: regress z_t = x_t - mu on z_{t-1} without intercept. The sums of
+        # E[z z'] follow from the same statistics: with m1 = sum E x_t, m0 = sum E x_{t-1}
+        # and M transitions, sum E[z_t z_{t-1}'] = S10[:, 1:] - m1 mu' - mu m0' + M mu mu', etc.
+        mu, M = mu_fixed, st.n_trans
+        m1, m0 = st.S10[:, 0], st.S00[1:, 0]
+        Z10 = st.S10[:, 1:] - np.outer(m1, mu) - np.outer(mu, m0) + M * np.outer(mu, mu)
+        Z00 = st.S00[1:, 1:] - np.outer(m0, mu) - np.outer(mu, m0) + M * np.outer(mu, mu)
+        Z11 = st.S11 - np.outer(m1, mu) - np.outer(mu, m1) + M * np.outer(mu, mu)
+        A = np.linalg.solve(Z00.T, Z10.T).T
+        Q = (Z11 - A @ Z10.T) / M
     Q = (Q + Q.T) / 2
     Z = ns_loadings(tau, p.lam)
     S = st.syy[:n] - 2.0 * np.einsum("jk,jk->j", Z, st.sya[:n, :3]) \
         + np.einsum("jk,jkl,jl->j", Z, st.sxx[:n, :3, :3], Z)
     h = np.maximum(S / np.maximum(st.n_i[:n], 1.0), h_min)
+    if mu_fixed is not None:
+        return DNSParams(mu=mu_fixed.copy(), A=A, Q=Q, h=h, lam=p.lam)
     try:
         mu = np.linalg.solve(np.eye(k) - A, c)
     except np.linalg.LinAlgError:
@@ -378,6 +435,7 @@ def fit_dns_mle(
     keep: int = 2,
     prune_iters: int = 100,
     shrink_tau: float | None = None,
+    mu: str = "sample",
     **kwargs,
 ) -> DNSFit:
     """Maximum-likelihood estimation of the DNS state-space model (yields only, or yields + macro).
@@ -416,6 +474,11 @@ def fit_dns_mle(
     data = data[ycols + mcols]
     n = len(ycols)
     p0 = start or two_step_start(data, lam)
+    if mu == "sample":
+        kwargs["mu_fixed"] = sample_mean(data, lam)
+        p0 = DNSParams(kwargs["mu_fixed"].copy(), p0.A, p0.Q, p0.h, p0.lam)
+    elif mu != "mle":
+        raise ValueError(f"mu must be 'sample' or 'mle', not {mu!r}")
     if shrink_tau is not None and mcols:
         kwargs["shrink"] = (float(shrink_tau), np.sqrt(np.diag(two_step_start(data, lam).Q)))
     if n_starts <= 1:
@@ -427,6 +490,8 @@ def fit_dns_mle(
     # `keep` starts are then run to full convergence; the rest are abandoned.
     rng = np.random.default_rng(seed)
     starts = [p0] + [_perturb(p0, rng) for _ in range(n_starts - 1)]
+    if "mu_fixed" in kwargs:  # perturb everything except the fixed mean
+        starts = [DNSParams(p0.mu.copy(), q.A, q.Q, q.h, q.lam) for q in starts]
     t0 = time.perf_counter()
     scouted = [_fit_from(data, n, p, estimate_lambda, lam, h_floor_bp, maxiter=prune_iters, max_restarts=1,
                          **{k: v for k, v in kwargs.items() if k not in ("maxiter", "max_restarts")})
@@ -470,6 +535,7 @@ def _fit_from(
     max_restarts: int = 10,
     grad_tol: float = 0.005,
     shrink: tuple | None = None,
+    mu_fixed: np.ndarray | None = None,
 ) -> DNSFit:
     """One start: EM, then L-BFGS-B with the exact score, restarted until it stops improving.
 
@@ -496,7 +562,7 @@ def _fit_from(
         if not np.isfinite(st.loglik) or st.loglik - prev < em_tol:
             break
         prev = st.loglik
-        p_new = em_update(p, st, tau, h_min=h_min)
+        p_new = em_update(p, st, tau, h_min=h_min, mu_fixed=mu_fixed)
         if not np.all(np.isfinite(p_new.A)) or np.min(np.linalg.eigvalsh(p_new.Q)) <= 0:
             break
         p = p_new
@@ -527,6 +593,9 @@ def _fit_from(
     n_dyn = k + k * k + k * (k + 1) // 2
     bounds = [(None, None)] * n_dyn + [(np.log(h_min) if h_floor_bp else None, None)] * n
     bounds += [(None, None)] * (theta0.size - len(bounds))
+    if mu_fixed is not None:  # equal bounds: L-BFGS-B holds these coordinates fixed
+        theta0[:k] = mu_fixed
+        bounds[:k] = [(m, m) for m in mu_fixed]
     # Stopping rules in log-likelihood units: converged when no parameter's
     # gradient exceeds `grad_tol`, or an iteration gains < 1e-7. On USD refits
     # this reaches the optimum of the old, much stricter settings to within
@@ -535,11 +604,12 @@ def _fit_from(
     # a large gradient, i.e. it stalled rather than converged.
     opts = {"maxiter": maxiter, "maxfun": 2 * maxiter, "ftol": 1e-7 / n_obs, "gtol": grad_tol / n_obs}
 
-    def optimise(theta_start):
+    def optimise(theta_start, objective=None):
+        objective = objective or fun
         res, restarts = None, 0
         for restarts in range(1, max_restarts + 1):
-            r = minimize(fun, theta_start if res is None else res.x, jac=True, method="L-BFGS-B", bounds=bounds,
-                         options=opts)
+            r = minimize(objective, theta_start if res is None else res.x, jac=True, method="L-BFGS-B",
+                         bounds=bounds, options=opts)
             res = r if res is None or r.fun < res.fun else res
             free = np.array([not (lo is not None and x <= lo + 1e-9) for x, (lo, _) in zip(res.x, bounds)])
             # Converged, or a restart that made no progress: the gradient is at its
@@ -562,13 +632,46 @@ def _fit_from(
         restrict = True
         res, restarts = optimise(q.to_vector(estimate_lambda))
         note = " [ended explosive: re-run restricted to stationary A]"
+
+        # If the restricted optimum presses against the cap, the constraint binds:
+        # the best stationary fit lies on the boundary rho(A) = cap (the data want a
+        # unit root). A wall that rejects trial points is a poor way to optimise along
+        # it (line searches stop wherever they hit it), so optimise on the boundary
+        # surface itself, with A = cap * B / rho(B) and B free, and keep the better fit.
+        A_res = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k).A
+        if spectral_radius(A_res) > MAX_RADIUS - 1e-4:
+            cap = MAX_RADIUS * (1.0 - 1e-9)  # on the cap, just inside the rejection test
+
+            def on_boundary(thB):
+                th = thB.copy()
+                th[a_slice] = (cap * thB[a_slice].reshape(k, k)
+                               / spectral_radius(thB[a_slice].reshape(k, k))).ravel()
+                return th
+
+            def fun_boundary(thB):
+                B = thB[a_slice].reshape(k, k)
+                if not np.all(np.isfinite(B)) or spectral_radius(B) == 0.0:
+                    return 1e6, np.zeros_like(thB)
+                f, g = fun(on_boundary(thB))
+                if f >= 1e6:
+                    return f, g
+                g = g.copy()
+                g[a_slice] = boundary_chain(g[a_slice].reshape(k, k), B, cap).ravel()
+                return f, g
+
+            res_b, restarts_b = optimise(res.x, fun_boundary)
+            if res_b.fun < res.fun:
+                res_b.x = on_boundary(res_b.x)
+                res, restarts = res_b, restarts_b
+                note = " [ended explosive: optimised on the stationarity boundary]"
     params = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k)
     pen = shrinkage_prior(params, *shrink)[0] if shrink is not None else 0.0
-    return DNSFit(params=params, loglik=-res.fun * n_obs - pen, n_params=theta0.size, nobs=n_obs,
+    return DNSFit(params=params, loglik=-res.fun * n_obs - pen,
+                  n_params=theta0.size - (k if mu_fixed is not None else 0), nobs=n_obs,
                   converged=bool(res.success),
                   message=f"EM {em_done} it; L-BFGS-B x{restarts}: {res.message}{note}",
                   seconds=time.perf_counter() - t0, columns=cols, estimate_lambda=estimate_lambda,
-                  penalty=pen)
+                  penalty=pen, mu_fixed=mu_fixed is not None)
 
 
 def cross_penalty(A: np.ndarray, tau: float, scales: np.ndarray) -> tuple[float, np.ndarray]:

@@ -71,7 +71,7 @@ def dns_two_step_forecasts(
     }
 
 
-FIT_CACHE_VERSION = 10  # bump when the estimator changes, so cached fits are not reused
+FIT_CACHE_VERSION = 11  # bump when the estimator changes, so cached fits are not reused
 
 
 def _cache_key(sample: pd.DataFrame, settings: dict) -> str:
@@ -87,12 +87,12 @@ def _fit_to_json(fit: DNSFit) -> dict:
     return {"mu": p.mu.tolist(), "A": p.A.tolist(), "Q": p.Q.tolist(), "h": p.h.tolist(), "lam": p.lam,
             "loglik": fit.loglik, "n_params": fit.n_params, "nobs": fit.nobs, "converged": fit.converged,
             "message": fit.message, "seconds": fit.seconds, "columns": fit.columns,
-            "estimate_lambda": fit.estimate_lambda, "penalty": fit.penalty}
+            "estimate_lambda": fit.estimate_lambda, "penalty": fit.penalty, "mu_fixed": fit.mu_fixed}
 
 
 def _fit_from_json(d: dict) -> DNSFit:
     params = DNSParams(mu=np.array(d["mu"]), A=np.array(d["A"]), Q=np.array(d["Q"]), h=np.array(d["h"]), lam=d["lam"])
-    return DNSFit(params=params, penalty=d.get("penalty", 0.0),
+    return DNSFit(params=params, penalty=d.get("penalty", 0.0), mu_fixed=d.get("mu_fixed", False),
                   **{k: d[k] for k in ("loglik", "n_params", "nobs", "converged", "message",
                                        "seconds", "columns", "estimate_lambda")})
 

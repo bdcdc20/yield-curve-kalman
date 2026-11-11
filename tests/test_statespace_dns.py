@@ -337,3 +337,57 @@ def test_estimates_stay_stationary_when_the_truth_has_a_unit_root():
     fit = fit_dns_mle(data, n_starts=4)
     assert spectral_radius(fit.params.A) < MAX_RADIUS
     assert np.isfinite(fit.loglik) and fit.params.A[0, 0] > 0.97
+
+
+def test_radius_gradient_and_boundary_chain_match_finite_differences():
+    from yck.model.statespace_dns import BOUNDARY_RADIUS, boundary_chain, radius_gradient, spectral_radius
+
+    rng = np.random.default_rng(4)
+    for complex_pair in (False, True):
+        B = rng.normal(size=(4, 4)) * 0.3 + np.diag([0.9, 0.5, 0.3, 0.2])
+        if complex_pair:
+            B[:2, :2] = [[0.8, -0.4], [0.4, 0.8]]  # dominant pair 0.8 +- 0.4i
+        W = rng.normal(size=(4, 4))
+        f = lambda M: np.sum(W * BOUNDARY_RADIUS * M / spectral_radius(M))  # any smooth function of A
+        num_r, num_f = np.zeros_like(B), np.zeros_like(B)
+        for i in range(4):
+            for j in range(4):
+                E = np.zeros_like(B); E[i, j] = 1e-6
+                num_r[i, j] = (spectral_radius(B + E) - spectral_radius(B - E)) / 2e-6
+                num_f[i, j] = (f(B + E) - f(B - E)) / 2e-6
+        np.testing.assert_allclose(radius_gradient(B), num_r, atol=1e-6)
+        np.testing.assert_allclose(boundary_chain(W, B), num_f, atol=1e-5)
+        assert abs(np.sum(boundary_chain(W, B) * B)) < 1e-8  # scaling B does not move A
+
+
+def test_mu_fixed_at_the_real_time_sample_mean(dra_fit):
+    from yck.model.statespace_dns import sample_mean
+
+    data, _, _, _ = dra_fit
+    sample = data.iloc[:200]  # what was known at an origin
+    fit = fit_dns_mle(sample)
+    est = fit_dns_mle(sample, mu="mle")
+    np.testing.assert_allclose(fit.params.mu, sample_mean(sample))
+    assert fit.mu_fixed and not est.mu_fixed
+    assert fit.n_params == est.n_params - fit.params.k
+    assert fit.loglik <= est.loglik + 1e-6  # a restriction cannot fit better
+    with pytest.raises(ValueError):
+        fit_dns_mle(sample, mu="median")
+
+
+def test_em_with_fixed_mu_never_lowers_the_likelihood():
+    from yck.model.kalman import smoothed_stats
+    from yck.model.statespace_dns import em_update, sample_mean
+
+    data, p, _ = _simulate_dra(N=200)
+    tau = np.array(GRID, float)
+    Y = data.to_numpy()
+    mu = sample_mean(data)
+    q = DNSParams(mu, p.A * 0.9, p.Q * 2.0, p.h * 3.0, p.lam)
+    ll = []
+    for _ in range(15):
+        st = smoothed_stats(q.statespace(tau), Y)
+        ll.append(st.loglik)
+        q = em_update(q, st, tau, mu_fixed=mu)
+        np.testing.assert_array_equal(q.mu, mu)
+    assert np.all(np.diff(ll) > -1e-6)

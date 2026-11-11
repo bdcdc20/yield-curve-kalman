@@ -151,6 +151,8 @@ def observed_information(fit: DNSFit, data: pd.DataFrame, h_floor_bp: float | No
     Y = data[cols].to_numpy(float)
     theta = p.to_vector(fit.estimate_lambda)
     free = np.ones(theta.size, bool)
+    if fit.mu_fixed:  # mu set to the sample mean, not estimated
+        free[:k] = False
     if h_floor_bp:
         o = k + k * k + k * (k + 1) // 2
         free[o:o + n] = p.h > (h_floor_bp / 100.0) ** 2 * (1 + 1e-6)

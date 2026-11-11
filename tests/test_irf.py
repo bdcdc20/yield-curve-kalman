@@ -84,7 +84,7 @@ def dra():
     from test_statespace_dns import _simulate_dra  # pytest puts tests/ on sys.path
 
     data, p, _ = _simulate_dra(N=400, seed=3)
-    return data, p, fit_dns_mle(data)
+    return data, p, fit_dns_mle(data, mu="mle")  # mu estimated, so the information covers every parameter
 
 
 def test_observed_information_matches_second_differences_of_loglik(dra):
@@ -122,3 +122,11 @@ def test_bands_cover_the_true_response_and_contain_the_point(dra):
     covered = np.mean((lo[1:, lvl, infl] <= path) & (path <= hi[1:, lvl, infl]))
     assert covered > 0.8
     assert np.all(lo[6:13, lvl, infl] > 0)  # the effect is significant at 6-12 months
+
+
+def test_fixed_mu_is_excluded_from_the_information(dra):
+    data, _, _ = dra
+    fit = fit_dns_mle(data)  # default: mu fixed at the sample mean
+    info = observed_information(fit, data, h_floor_bp=None)
+    k = fit.params.k
+    assert fit.mu_fixed and not info.free[:k].any() and info.free[k:].all()
