@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 151 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
+| Offline tests | **Done.** 159 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -1266,6 +1266,41 @@ plain / with AR(1); DM):
      - Against forwards and the random walk (DM).
      - Against the 3-factor model with the same error model (DM).
      - In-sample residual sd by maturity.
+     - The 90% model confidence set over all models.
+
+   **Grid for item 7, fixed on 12 Nov 2026 before any of it was run**
+   (`model/macro_factors.py`, `eval/grid.py: factor_grid`;
+   `python -m yck backtest --ccy USD EUR GBP --factors`):
+
+   - **Panels** (`macro_panels` in the config; all public, git-ignored):
+     - USD: FRED-MD, 126 series, with all 327 monthly vintages from 1999-08.
+     - EUR: EA-MD-QD, 47 monthly series, the authors' default ("light")
+       codes; CC BY-NC.
+     - GBP: UK-MD, 111 series.
+
+     Interest rates and spreads are excluded: 17 USD, 3 EUR and 5 GBP
+     series.
+   - **Factors** (McCracken & Ng 2016):
+     1. Transformation codes; outliers beyond 10 IQR set to missing.
+     2. Series missing more than 20% of the window are dropped.
+     3. Standardised, then EM principal components (Stock & Watson 2002)
+        on the estimation window.
+     4. Unit variance, with the sign fixed so that factor 1 loads
+        positively on industrial production and factor 2 on consumer
+        prices.
+     5. Months with less than 30% of the panel observed stay missing.
+   - **Real time.** Factors are re-extracted at every origin from the panel
+     known then:
+     - USD: the FRED-MD vintage of the origin's month.
+     - EUR, GBP: the latest vintage cut at each series' own publication
+       delay in that file (its ragged edge); revisions are ignored.
+   - **Models** (λ fixed): yields + factor 1; yields + factors 1–2; yields
+     + policy rate + factors 1–2. Each is run plain and with `ar1` errors:
+     6 backtests per currency, 3 sets of refits.
+   - **Reporting.**
+     - Against forwards and the random walk (DM).
+     - Against yields only (Clark–West, nested).
+     - Against the policy-rate model (DM).
      - The 90% model confidence set over all models.
 
    Fixing failures 1 and 2 also matters for step 8: the trading signal is

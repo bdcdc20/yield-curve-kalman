@@ -65,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--svensson", action="store_true",
                    help="step 7b item 8: 4-factor dynamic Svensson (second curvature peaking at 9 or 90 months), "
                         "yields only, plain and with AR(1) errors")
+    b.add_argument("--factors", action="store_true",
+                   help="step 7b item 7: yields + real-time macro factors from large panels (1 or 2 factors, and "
+                        "policy rate + 2 factors), plain and with AR(1) errors")
     b.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
     b.add_argument("--data-dir", type=Path, default=ROOT / "data")
     a = p.parse_args(argv)
@@ -91,10 +94,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _backtest(a) -> int:
-    from .eval.grid import (STANDARD_GRID, accuracy_grid, anchor_grid, run_grid, rwprior_grid, shadow_grid,
-                            svensson_grid)
+    from .eval.grid import (STANDARD_GRID, accuracy_grid, anchor_grid, factor_grid, run_grid, rwprior_grid,
+                            shadow_grid, svensson_grid)
 
-    if a.svensson:
+    if a.factors:
+        grid = factor_grid
+    elif a.svensson:
         grid = svensson_grid
     elif a.rwprior:
         grid = rwprior_grid

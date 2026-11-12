@@ -24,6 +24,7 @@ from yck.eval.backtest import (dns_kalman_forecasts, dns_two_step_forecasts, for
                                random_walk_forecasts)
 from yck.eval.combine import combine
 from yck.model.adjust import ewma_endpoint, survey_endpoint
+from yck.model.macro_factors import CombinedMacro, RealTimeFactors
 
 # USD forecasts from 2000 (ALFRED vintages); EUR and GBP from 2010, so EUR has at
 # least 5 years of estimation data. GBP estimation starts in 1993 with inflation
@@ -89,11 +90,33 @@ def svensson_grid(ccy: str) -> list[tuple]:
             for err in (None, "ar1")]
 
 
+# Step 7b item 7, fixed before it was run (README section 8): macro factors from large public panels.
+FACTOR_SETS = (("factor1",), ("factor1", "factor2"), ("policy_rate", "factor1", "factor2"))
+
+
+def factor_grid(ccy: str) -> list[tuple]:
+    """Yields + 1 or 2 panel factors, and yields + policy rate + 2 factors, plain and with AR(1) errors."""
+    return [(m, "fixed", None, None, err) for m in FACTOR_SETS for err in (None, "ar1")]
+
+
+def load_macro(ccy: str, mvars, data_dir: Path, config: Path, start=None):
+    """Real-time macro source for a variable set: named series (`RealTimeMacro`), panel factors
+    ('factor1', 'factor2', ...: `RealTimeFactors`), or both side by side."""
+    named = tuple(v for v in mvars if not v.startswith("factor"))
+    r = sum(v.startswith("factor") for v in mvars)
+    parts = []
+    if named:
+        parts.append(RealTimeMacro.load(ccy, data_dir, config, named))
+    if r:
+        parts.append(RealTimeFactors.load(ccy, data_dir, config, r, start=start))
+    return parts[0] if len(parts) == 1 else CombinedMacro(*parts)
+
+
 def run_tag(mvars, lam_mode: str, tau, floor=1.0, endpoint=None, error_ar=None, anchor=None, shadow=None,
             rw_tau=None, lam2=None) -> str:
     """File tag of one backtest, e.g. 'macro-policy_rate_ep-ewma_lamfixed_err-ar1c'
     (fc_{CCY}_kalman_{tag}_h{h}.parquet). Without an endpoint, error model or anchor the tags are those of step 7."""
-    mtag = "" if mvars is None else ("macro_" if len(mvars) == 3 else "macro-" + "+".join(mvars) + "_")
+    mtag = "" if mvars is None else ("macro_" if tuple(mvars) == ALL_VARS else "macro-" + "+".join(mvars) + "_")
     return (mtag + (f"shrink{tau:g}_" if tau is not None else "") + (f"rw{rw_tau:g}_" if rw_tau is not None else "")
             + (f"sv{lam2:.4f}_" if lam2 is not None else "")
             + (f"ep-{endpoint}_" if endpoint else "")
@@ -130,7 +153,7 @@ def plan_runs(ccys, data_dir: Path, config: Path, grid=STANDARD_GRID, est_start=
         ext = None
         for mvars, lam_mode, tau, ep, err, anc, sr, rw, l2 in _grid_for(grid, ccy):
             if mvars is not None and mvars not in macros:
-                macros[mvars] = RealTimeMacro.load(ccy, data_dir, config, mvars)
+                macros[mvars] = load_macro(ccy, mvars, data_dir, config, start=es)
             if ep is not None and ep not in endpoints:
                 endpoints[ep] = load_endpoint(ep, ccy, y, data_dir, config)
             if anc is not None and ext is None:
