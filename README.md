@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 164 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, panel parsers, EM-PCA and real-time factor rules, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
+| Offline tests | **Done.** 165 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, panel parsers, EM-PCA and real-time factor rules, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -93,7 +93,7 @@ real-time sample mean (§6.3).
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
 | Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–6 done: the shadow-rate DNS (`model/shadow.py`, notebook 07, §7.9) has large gains at the EUR short end, small in GBP, none in USD; the random-walk prior (notebook 08, §7.10) helps the EUR curve and GBP long end at τ = 0.03. Item 8 (dynamic Svensson, notebook 09, §7.11) done: a second, short-end curvature factor fixes the short-end fit and the one-month forecasts. Item 7 (macro factors from FRED-MD / EA-MD-QD / UK-MD, notebook 10, §7.12) done: no information beyond the policy rate. **Step 7b complete**; what was adopted is summarised at the end of §7.12 |
-| Trading evaluation | Not started (§7.5; after §8 step 7b) |
+| Trading evaluation | **Done** (`eval/trading.py`, `notebooks/11_trading.ipynb`, results in §7.13): carry / roll-down is the strategy to beat (USD 10y Sharpe 0.40), and no model beats it more often than chance; the policy rate adds P&L to USD curve trades |
 | Final write-up | Not started (§8, step 9) |
 
 Latest verified coverage (month-end, output of `python -m yck fetch`):
@@ -232,6 +232,19 @@ a model confidence set covers every model in the project.
 (`notebooks/10_macro_factors.ipynb`, §7.12).** One or two real-time factors
 from FRED-MD (all vintages), EA-MD-QD and UK-MD add nothing beyond the
 policy rate in USD. Two factors make EUR and GBP forecasts 5–17% worse.
+
+**Trading evaluation (`notebooks/11_trading.ipynb`, §7.13).** Every
+forecast was turned into trades against the forward curve: outright, curve,
+butterfly and cross-currency, over 1-, 6- and 12-month horizons, after
+costs.
+
+- **Carry / roll-down is the strategy to beat**, with no model needed:
+  Sharpe ratio 0.40 on the USD 10y and 0.33 on the EUR 10y (h = 12).
+- **No model beats carry more often than chance:** 10 of 275 comparisons
+  have t > 2, against about 7 expected.
+- **The macro question:** the policy rate adds P&L to USD curve trades
+  (steepener at h = 12, butterfly at h = 1 and 6). The full macro model does
+  not.
 
 ## 3. Repository layout
 
@@ -1067,6 +1080,57 @@ month, at the short end, and in EUR's level bias. The trading evaluation
 - EUR: shadow-rate DNS + AR(1), with the random-walk prior for the long
   end.
 
+### 7.13 Results: trading evaluation (step 8)
+
+`notebooks/11_trading.ipynb`; the grid (§8 step 8) was committed before any
+P&L was looked at. Every figure is net of 0.5 bp per unit of DV01 per leg,
+with scaled sizing, unless stated.
+
+**Sharpe ratio at h = 12:**
+
+| | Buy-and-hold | Carry | Yields | Best model | Policy rate | Full macro | Combination A |
+|---|---|---|---|---|---|---|---|
+| USD 10y | 0.26 | **0.40** | 0.31 | 0.32 | 0.33 | 0.19 | 0.36 |
+| USD 5y | 0.28 | **0.38** | 0.22 | 0.24 | 0.27 | 0.09 | 0.32 |
+| USD 2s10s | – | −0.34 | −0.27 | −0.25 | **0.01** | 0.00 | −0.33 |
+| EUR 10y | 0.07 | **0.33** | −0.16 | −0.24 | −0.27 | −0.17 | 0.26 |
+| GBP 2y | −0.17 | 0.22 | 0.37 | **0.39** | 0.37 | −0.39 | 0.24 |
+| GBP 10y | −0.03 | **0.15** | −0.18 | −0.06 | −0.06 | −0.32 | 0.09 |
+
+- **No model beats carry more often than chance.** Over 275
+  model-versus-carry comparisons (mean net P&L, HAC t), t > 2 occurs 10
+  times with scaled sizing and 9 with sign sizing, against about 7 expected
+  by chance. t < −2 occurs 13 and 5 times.
+- **Where models look better, it is small or unreliable:**
+  - GBP 2y at h = 12: Sharpe 0.37–0.39 against carry's 0.22, but the mean
+    difference is not significant.
+  - USD short end at one month: t = 2.8–3.4 against carry, only because
+    carry loses there.
+  - EUR 2s10s at one month: Sharpe 0.42–0.71 against 0.11 (t = 2.1–2.8).
+- **Losers:** butterflies built from models with a poor curvature forecast
+  (Sharpe −0.3 to −1.6), and cross-currency 10y spreads for every signal.
+- **The macro question.** Against yields only in USD, the policy-rate
+  model has higher mean P&L in 15 of 18 strategy-horizon pairs. It is
+  significant for the butterfly at h = 1 and 6 (t = 4.0, 2.0) and the 2s10s
+  steepener at h = 12 (t = 2.2). The full macro model adds nothing in USD
+  and EUR, and loses in GBP (t ≈ −2).
+- **Costs barely matter at h = 12.** Each unit of DV01 turns over about
+  once a year: up to 2 bp per leg, single-maturity Sharpe ratios fall by at
+  most 0.05. The multi-leg butterflies fall the most.
+- **Bookkeeping correction made before this write-up.** A first version
+  annualised the Sharpe ratios of overlapping h-month tranches by √12, not
+  √(12/h), which overstated them √h-fold (3.5 times at h = 12). This
+  changed no ranking or t-statistic, and the published numbers use the
+  correct formula (tested).
+- **Bottom line.** This agrees with the RMSE results and with Thornton &
+  Valente (2012): forecasting skill does not turn into money against the
+  forward curve. The robust return is the term premium that carry
+  collects. Worth testing on contract data: the policy-rate signal for USD
+  curve trades, and GBP 2y.
+- **Limitations.** These are curve-implied returns (no futures basis,
+  roll, margin or financing spread), and the GSW, ECB and BoE curves are
+  smoothed fits.
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -1361,8 +1425,8 @@ month, at the short end, and in EUR's level bias. The trading evaluation
    Fixing failures 1 and 2 also matters for step 8: the trading signal is
    F − ŷ, and the level bias would keep the strategy short duration through
    the 2000–2015 and 2010–2021 rallies.
-8. **Trading evaluation (`src/yck/eval/trading.py`, §7.5), last, once the
-   models are final (after step 7b).** Excess returns from the curves, carry / roll-down
+8. ✅ **Trading evaluation (`src/yck/eval/trading.py`, §7.5; results in
+   §7.13).** Excess returns from the curves, carry / roll-down
    benchmark, then strategies: short-rate vs forwards first, then duration,
    curve and fly, then cross-currency relative value. Variance-based
    sizing, costs, Sharpe and certainty-equivalent return. The headline

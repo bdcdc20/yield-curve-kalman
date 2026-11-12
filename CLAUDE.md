@@ -55,8 +55,12 @@ evaluation protocol, the roadmap and the decisions already made.
   EA-MD-QD / UK-MD in `yck fetch`, `backtest --factors`, notebook 10, README
   §7.12): panel factors add nothing beyond the policy rate. **Step 7b is
   complete**; the models adopted for step 8 are summarised at the end of
-  README §7.12. Next: the trading evaluation (step 8), then the write-up
-  (step 9). The UK-MD and EA-MD-QD URLs in the config name a monthly
+  README §7.12.
+- Step 8 is done (`eval/trading.py`, notebook 11, README §7.13): carry /
+  roll-down is the strategy to beat, and no model beats it more often than
+  chance. The policy rate adds P&L to USD curve trades. Sharpe ratios of
+  overlapping h-month tranches are annualised by √(12/h). Next: the
+  write-up (step 9). The UK-MD and EA-MD-QD URLs in the config name a monthly
   release; update them to refresh. Fix each new grid in README §8 and commit it
   before running it.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
@@ -76,7 +80,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 164 passed
+python3 -m pytest -q                  # expect 165 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```
