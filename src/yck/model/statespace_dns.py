@@ -440,6 +440,7 @@ def fit_dns_mle(
     prune_iters: int = 100,
     shrink_tau: float | None = None,
     mu: str = "sample",
+    rw_tau: float | None = None,
     **kwargs,
 ) -> DNSFit:
     """Maximum-likelihood estimation of the DNS state-space model (yields only, or yields + macro).
@@ -473,6 +474,13 @@ def fit_dns_mle(
     dynamics (yields-only forecasts); tau -> inf is the full DRA model. The fit
     maximises log-likelihood + log-prior (MAP); `loglik` reports the
     likelihood alone and `penalty` the log-prior.
+
+    **Random-walk prior** (`rw_tau`, README section 8 step 7b item 5). A
+    Minnesota prior centred on A = I, i.e. on every state following a random
+    walk (Carriero, Kapetanios & Marcellino 2012; Duffee 2011 finds a random
+    walk for the level the most useful restriction): own lags ~ N(1, tau^2),
+    cross lags ~ N(0, (RW_THETA tau s_i / s_j)^2), no prior on Q. Small tau
+    gives near-random-walk forecasts, large tau the MLE.
     """
     ycols, mcols = split_columns(data.columns)
     data = data[ycols + mcols]
@@ -483,8 +491,12 @@ def fit_dns_mle(
         p0 = DNSParams(kwargs["mu_fixed"].copy(), p0.A, p0.Q, p0.h, p0.lam)
     elif mu != "mle":
         raise ValueError(f"mu must be 'sample' or 'mle', not {mu!r}")
+    if shrink_tau is not None and rw_tau is not None:
+        raise ValueError("choose one prior: shrink_tau (cross terms to zero) or rw_tau (random walk)")
     if shrink_tau is not None and mcols:
-        kwargs["shrink"] = (float(shrink_tau), np.sqrt(np.diag(two_step_start(data, lam).Q)))
+        kwargs["shrink"] = (float(shrink_tau), np.sqrt(np.diag(two_step_start(data, lam).Q)), "cross")
+    if rw_tau is not None:
+        kwargs["shrink"] = (float(rw_tau), np.sqrt(np.diag(two_step_start(data, lam).Q)), "rw")
     if n_starts <= 1:
         return _fit_from(data, n, p0, estimate_lambda, lam, h_floor_bp, **kwargs)
 
@@ -691,8 +703,24 @@ def cross_penalty(A: np.ndarray, tau: float, scales: np.ndarray) -> tuple[float,
     return float(-0.5 * np.sum(w * A**2)), -w * A
 
 
-def shrinkage_prior(p: DNSParams, tau: float, scales: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-    """Log prior shrinking every factor<->macro link to zero, with gradients w.r.t. A and the Q-Cholesky vector.
+RW_THETA = 0.5  # Minnesota cross-lag tightness relative to own lags
+
+
+def rw_prior(A: np.ndarray, tau: float, scales: np.ndarray) -> tuple[float, np.ndarray]:
+    """Log of the Minnesota random-walk prior on A and its gradient: A_ii ~ N(1, tau^2),
+    A_ij ~ N(0, (RW_THETA tau s_i / s_j)^2)."""
+    k = A.shape[0]
+    sd = RW_THETA * tau * scales[:, None] / scales[None, :]
+    np.fill_diagonal(sd, tau)
+    dev = A - np.eye(k)
+    w = 1.0 / sd ** 2
+    return float(-0.5 * np.sum(w * dev ** 2)), -w * dev
+
+
+def shrinkage_prior(p: DNSParams, tau: float, scales: np.ndarray, kind: str = "cross") -> tuple[float, np.ndarray, np.ndarray]:
+    """Log prior and its gradients w.r.t. A and the Q-Cholesky vector: `cross` (below) or `rw` (`rw_prior`).
+
+    `cross` shrinks every factor<->macro link to zero.
 
     Two blocks are shrunk:
 
@@ -708,6 +736,9 @@ def shrinkage_prior(p: DNSParams, tau: float, scales: np.ndarray) -> tuple[float
     not: correlated shocks still let macro data re-estimate the curve dynamics.
     """
     k = p.k
+    if kind == "rw":
+        pen, dA = rw_prior(p.A, tau, scales)
+        return pen, dA, np.zeros(k * (k + 1) // 2)
     pen_A, dA = cross_penalty(p.A, tau, scales)
     (rows, cols), diag = _tril(k)
     L = np.linalg.cholesky(p.Q)

@@ -127,7 +127,7 @@ def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> 
 
 
 def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lambda, lam, h_floor_bp, n_starts,
-                macro, shrink_tau, endpoint=None, shadow=None):
+                macro, shrink_tau, endpoint=None, shadow=None, rw_tau=None):
     """What a Kalman backtest re-estimates: (y, origins, refit dates, fit settings, panel function).
 
     With an `endpoint`, the estimation sample starts at its first available
@@ -141,6 +141,8 @@ def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lamb
     settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
     if shrink_tau is not None:
         settings["shrink_tau"] = shrink_tau  # only added when used, so existing cache keys stay valid
+    if rw_tau is not None:
+        settings["rw_tau"] = rw_tau
     if shadow is not None:
         if macro is not None or endpoint is not None or estimate_lambda:
             raise ValueError("the shadow-rate model is yields only, lambda fixed, without an endpoint")
@@ -158,7 +160,7 @@ def _fit_cost(sample: pd.DataFrame, settings: dict) -> float:
     """Rough relative cost of one re-estimation: months x states^2, more with lambda or shrinkage."""
     k = 3 + sum(1 for c in sample.columns if not str(c).endswith("m"))
     return len(sample) * k * k * (1.5 if settings.get("estimate_lambda") else 1.0) * (
-        1.5 if "shrink_tau" in settings else 1.0) * (4.0 if settings.get("model") == "shadow" else 1.0)
+        1.5 if "shrink_tau" in settings or "rw_tau" in settings else 1.0) * (4.0 if settings.get("model") == "shadow" else 1.0)
 
 
 def prefit(specs: list[dict], jobs: int, cache_dir: str | Path, verbose: bool = False) -> int:
@@ -177,10 +179,10 @@ def prefit(specs: list[dict], jobs: int, cache_dir: str | Path, verbose: bool = 
     for spec in specs:
         kw = {k: v for k, v in spec.items() if k in ("first_origin", "est_start", "reestimate_every",
                                                       "estimate_lambda", "lam", "h_floor_bp", "n_starts",
-                                                      "macro", "shrink_tau", "endpoint", "shadow")}
+                                                      "macro", "shrink_tau", "endpoint", "shadow", "rw_tau")}
         full = {"first_origin": "2000-01-31", "est_start": None, "reestimate_every": 12, "estimate_lambda": False,
                 "lam": DL_LAMBDA, "h_floor_bp": 1.0, "n_starts": 6, "macro": None, "shrink_tau": None,
-                "endpoint": None, "shadow": None, **kw}
+                "endpoint": None, "shadow": None, "rw_tau": None, **kw}
         _, _, refit_at, settings, panel = _refit_plan(spec["yields"], **full)
         for t in refit_at:
             sample = panel(t)
@@ -222,6 +224,7 @@ def dns_kalman_forecasts(
     anchor: pd.DataFrame | None = None,
     anchor_columns=("3m", "6m", "9m", "12m"),
     shadow: str | None = None,
+    rw_tau: float | None = None,
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
@@ -271,10 +274,12 @@ def dns_kalman_forecasts(
       (`yck.model.shadow`), estimated by EKF maximum likelihood from the
       linear fit, with forecasts through the measurement function. Yields
       only.
+    - `rw_tau`: the Minnesota random-walk prior on A (`fit_dns_mle`), with
+      its own refits.
     """
     y, origins, refit_at, settings, panel = _refit_plan(yields, first_origin, est_start, reestimate_every,
                                                         estimate_lambda, lam, h_floor_bp, n_starts, macro, shrink_tau,
-                                                        endpoint, shadow)
+                                                        endpoint, shadow, rw_tau)
     cache = str(cache_dir) if cache_dir else None
     samples = [panel(t) for t in refit_at]
 

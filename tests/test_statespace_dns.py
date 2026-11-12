@@ -391,3 +391,26 @@ def test_em_with_fixed_mu_never_lowers_the_likelihood():
         q = em_update(q, st, tau, mu_fixed=mu)
         np.testing.assert_array_equal(q.mu, mu)
     assert np.all(np.diff(ll) > -1e-6)
+
+
+# --------------------------------------------------------------------------- random-walk prior (step 7b item 5)
+def test_rw_prior_gradient_and_tight_prior_gives_a_random_walk():
+    from yck.model.statespace_dns import rw_prior
+    rng = np.random.default_rng(0)
+    A, s = rng.normal(scale=0.5, size=(4, 4)), np.array([0.3, 0.5, 0.8, 0.2])
+    pen, g = rw_prior(A, 0.1, s)
+    num = np.zeros_like(A)
+    for i in range(4):
+        for j in range(4):
+            e = np.zeros_like(A); e[i, j] = 1e-6
+            num[i, j] = (rw_prior(A + e, 0.1, s)[0] - rw_prior(A - e, 0.1, s)[0]) / 2e-6
+    np.testing.assert_allclose(g, num, rtol=1e-6)
+    assert rw_prior(np.eye(4), 0.1, s)[0] == 0.0
+    y, _ = _simulate(TRUE, N=200)
+    tight = fit_dns_mle(y, rw_tau=1e-3)
+    loose = fit_dns_mle(y, rw_tau=1e3)
+    free = fit_dns_mle(y)
+    assert np.abs(tight.params.A - np.eye(3)).max() < 0.02
+    np.testing.assert_allclose(loose.params.A, free.params.A, atol=2e-3)
+    with pytest.raises(ValueError):
+        fit_dns_mle(y, rw_tau=0.1, shrink_tau=0.1)
