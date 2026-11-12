@@ -31,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     pr = sub.add_parser("probe-ecb", help="list ECB series matching a wildcard key, with last date")
     pr.add_argument("flow")
     pr.add_argument("key", nargs="?", default="", help="omit to list dataflows whose id/name matches FLOW")
+    fg = sub.add_parser("figures", help="rebuild the README figures in docs/figures from data/ and data/results")
+    fg.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
+    fg.add_argument("--data-dir", type=Path, default=ROOT / "data")
+    fg.add_argument("--out", type=Path, default=ROOT / "docs" / "figures")
     b = sub.add_parser("backtest", help="recursive out-of-sample Kalman DNS forecasts (cached, parallel)")
     b.add_argument("--ccy", nargs="*", default=["USD"], choices=["USD", "EUR", "GBP"])
     b.add_argument("--lam", nargs="*", default=["fixed", "est"], choices=["fixed", "est"],
@@ -90,6 +94,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "backtest":
         return _backtest(a)
+    if a.cmd == "figures":
+        from .report import make_figures
+        for path in make_figures(a.data_dir, a.config, a.out):
+            print(path)
+        return 0
     return 2
 
 
