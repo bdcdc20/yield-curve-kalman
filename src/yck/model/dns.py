@@ -40,8 +40,8 @@ def maturities_from_columns(columns) -> np.ndarray:
     return np.asarray(out)
 
 
-def ns_loadings(tau, lam: float = DL_LAMBDA) -> np.ndarray:
-    """Nelson-Siegel factor loadings, shape (len(tau), 3).
+def ns_loadings(tau, lam: float = DL_LAMBDA, lam2: float | None = None) -> np.ndarray:
+    """Nelson-Siegel factor loadings, shape (len(tau), 3); with `lam2`, Svensson's four, shape (len(tau), 4).
 
     Columns are level (1), slope ((1-e^{-x})/x) and curvature
     ((1-e^{-x})/x - e^{-x}), with x = lam*tau. As tau -> 0 they tend to
@@ -53,7 +53,13 @@ def ns_loadings(tau, lam: float = DL_LAMBDA) -> np.ndarray:
     with np.errstate(divide="ignore", invalid="ignore"):
         slope = np.where(x < 1e-8, 1.0 - x / 2.0, -np.expm1(-x) / x)
     curv = slope - np.exp(-x)
-    return np.column_stack([np.ones_like(x), slope, curv])
+    cols = [np.ones_like(x), slope, curv]
+    if lam2 is not None:  # a second curvature with its own decay (Svensson 1994; dynamic: De Pooter 2007)
+        x2 = lam2 * np.asarray(tau, dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slope2 = np.where(x2 < 1e-8, 1.0 - x2 / 2.0, -np.expm1(-x2) / x2)
+        cols.append(slope2 - np.exp(-x2))
+    return np.column_stack(cols)
 
 
 def ns_loadings_dlam(tau, lam: float = DL_LAMBDA) -> np.ndarray:
@@ -69,7 +75,7 @@ def ns_loadings_dlam(tau, lam: float = DL_LAMBDA) -> np.ndarray:
     return np.column_stack([np.zeros_like(x), tau * ds, tau * (ds + np.exp(-x))])
 
 
-def fit_factors(yields: pd.DataFrame, lam: float = DL_LAMBDA, min_obs: int = 3) -> pd.DataFrame:
+def fit_factors(yields: pd.DataFrame, lam: float = DL_LAMBDA, min_obs: int = 3, lam2: float | None = None) -> pd.DataFrame:
     """Step 1: OLS of each month's yields on the loadings -> (level, slope, curvature).
 
     Each month uses only the maturities observed that month. Missing points
@@ -81,13 +87,13 @@ def fit_factors(yields: pd.DataFrame, lam: float = DL_LAMBDA, min_obs: int = 3) 
     Months that share a missing-data pattern share a design matrix, so the
     regression is solved once per pattern, not once per month.
     """
-    if min_obs < 3:
-        raise ValueError("min_obs must be at least 3 (three factors)")
+    nf = 3 if lam2 is None else 4
+    min_obs = max(min_obs, nf)
     tau = maturities_from_columns(yields.columns)
-    X = ns_loadings(tau, lam)
+    X = ns_loadings(tau, lam, lam2)
     Y = yields.to_numpy(float)
     obs = np.isfinite(Y)
-    F = np.full((len(Y), 3), np.nan)
+    F = np.full((len(Y), nf), np.nan)
 
     patterns, inverse = np.unique(obs, axis=0, return_inverse=True)
     for k, mask in enumerate(patterns):
@@ -96,12 +102,16 @@ def fit_factors(yields: pd.DataFrame, lam: float = DL_LAMBDA, min_obs: int = 3) 
         rows = np.flatnonzero(inverse.ravel() == k)
         beta, *_ = np.linalg.lstsq(X[mask], Y[np.ix_(rows, mask)].T, rcond=None)
         F[rows] = beta.T
-    return pd.DataFrame(F, index=yields.index, columns=list(FACTORS))
+    return pd.DataFrame(F, index=yields.index, columns=factor_names(lam2))
 
 
-def fitted_yields(factors: pd.DataFrame, columns, lam: float = DL_LAMBDA) -> pd.DataFrame:
+def factor_names(lam2: float | None = None) -> list:
+    return list(FACTORS) + ([] if lam2 is None else ["curvature2"])
+
+
+def fitted_yields(factors: pd.DataFrame, columns, lam: float = DL_LAMBDA, lam2: float | None = None) -> pd.DataFrame:
     """Yields implied by the factors at the maturities in `columns` (labels like '24m')."""
-    X = ns_loadings(maturities_from_columns(columns), lam)
+    X = ns_loadings(maturities_from_columns(columns), lam, lam2)
     return pd.DataFrame(factors.to_numpy(float) @ X.T, index=factors.index, columns=list(columns))
 
 

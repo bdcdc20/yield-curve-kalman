@@ -66,7 +66,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from yck.model.dns import (DL_LAMBDA, FACTORS, fit_dynamics, fit_factors, fitted_yields, maturities_from_columns,
+from yck.model.dns import (DL_LAMBDA, FACTORS, factor_names, fit_dynamics, fit_factors, fitted_yields, maturities_from_columns,
                            ns_loadings, ns_loadings_dlam)
 from yck.model.kalman import (FilterResult, SmootherStats, StateSpace, filtered_states, forecast_state,
                               kalman_filter, lyapunov, rts_smoother, smoothed_stats, stationary_init)
@@ -126,10 +126,16 @@ class DNSParams:
     Q: np.ndarray  # (k, k) state shock covariance
     h: np.ndarray  # (n,) measurement error variances, one per yield maturity
     lam: float = DL_LAMBDA
+    lam2: float | None = None  # second curvature decay: the 4-factor dynamic Svensson model (step 7b item 8)
 
     @property
     def k(self) -> int:
         return self.mu.size
+
+    @property
+    def nf(self) -> int:
+        """Number of yield factors: 3 (Nelson-Siegel) or 4 (Svensson)."""
+        return 3 if self.lam2 is None else 4
 
     # ----------------------------------------------------------------- packing
     def to_vector(self, estimate_lambda: bool = False) -> np.ndarray:
@@ -143,7 +149,7 @@ class DNSParams:
 
     @classmethod
     def from_vector(cls, theta, n: int, estimate_lambda: bool = False, lam: float = DL_LAMBDA,
-                    k: int = 3) -> "DNSParams":
+                    k: int = 3, lam2: float | None = None) -> "DNSParams":
         theta = np.asarray(theta, float)
         (rows, cols), diag = _tril(k)
         nl = rows.size
@@ -156,16 +162,17 @@ class DNSParams:
         h = np.exp(theta[o + nl:o + nl + n])
         if estimate_lambda:
             lam = float(np.exp(theta[o + nl + n]))
-        return cls(mu=mu, A=A, Q=L @ L.T, h=h, lam=lam)
+        return cls(mu=mu, A=A, Q=L @ L.T, h=h, lam=lam, lam2=lam2)
 
     # ----------------------------------------------------------------- model
     def statespace(self, tau) -> StateSpace:
         """The Kalman-filter representation: yields at maturities tau (months), then the macro series."""
-        k, q = self.k, self.k - 3
+        k, nf = self.k, self.nf
+        q = k - nf
         n = len(tau)
         Z = np.zeros((n + q, k))
-        Z[:n, :3] = ns_loadings(tau, self.lam)
-        Z[n:, 3:] = np.eye(q)
+        Z[:n, :nf] = ns_loadings(tau, self.lam, self.lam2)
+        Z[n:, nf:] = np.eye(q)
         H = np.diag(np.concatenate([self.h, np.full(q, MACRO_H)]))
         c = (np.eye(k) - self.A) @ self.mu
         try:
@@ -175,22 +182,22 @@ class DNSParams:
         return StateSpace(Z=Z, H=H, T=self.A, Q=self.Q, a1=a1, P1=P1, c=c)
 
 
-def two_step_start(data: pd.DataFrame, lam: float = DL_LAMBDA) -> DNSParams:
+def two_step_start(data: pd.DataFrame, lam: float = DL_LAMBDA, lam2: float | None = None) -> DNSParams:
     """Starting values: OLS factors (step 1) and a VAR(1) on factors plus any macro columns.
 
     Measurement variances come from the cross-sectional residuals.
     """
     ycols, mcols = split_columns(data.columns)
     yields = data[ycols]
-    f = fit_factors(yields, lam)
+    f = fit_factors(yields, lam, lam2=lam2)
     states = pd.concat([f, data[mcols]], axis=1) if mcols else f
     dyn = fit_dynamics(states, "var1")
-    resid = yields - fitted_yields(f, ycols, lam)
+    resid = yields - fitted_yields(f, ycols, lam, lam2)
     h = np.maximum((resid**2).mean().to_numpy(), 1e-6)  # floor: log(0) would break the transform
-    return DNSParams(mu=dyn.mu, A=dyn.A, Q=dyn.Q, h=h, lam=lam)
+    return DNSParams(mu=dyn.mu, A=dyn.A, Q=dyn.Q, h=h, lam=lam, lam2=lam2)
 
 
-def sample_mean(data: pd.DataFrame, lam: float = DL_LAMBDA) -> np.ndarray:
+def sample_mean(data: pd.DataFrame, lam: float = DL_LAMBDA, lam2: float | None = None) -> np.ndarray:
     """Sample mean of the states: the month-by-month OLS factors (step 1 of Diebold-Li) and the observed macro series.
 
     Used as the fixed long-run mean mu (`fit_dns_mle(mu="sample")`). It uses only
@@ -198,7 +205,7 @@ def sample_mean(data: pd.DataFrame, lam: float = DL_LAMBDA) -> np.ndarray:
     the origin.
     """
     ycols, mcols = split_columns(data.columns)
-    f = fit_factors(data[ycols], lam)
+    f = fit_factors(data[ycols], lam, lam2=lam2)
     means = [f[c].mean() for c in f.columns] + [data[c].mean() for c in mcols]
     return np.asarray(means, float)
 
@@ -231,7 +238,7 @@ class DNSFit:
 
     @property
     def state_names(self) -> list:
-        return list(FACTORS) + split_columns(self.columns)[1]
+        return factor_names(self.params.lam2) + split_columns(self.columns)[1]
 
     def statespace(self) -> StateSpace:
         return self.params.statespace(maturities_from_columns(self.yield_columns))
@@ -346,8 +353,9 @@ def score(theta, st: SmootherStats, tau, estimate_lambda: bool = False, lam: flo
     Ik = np.eye(k)
 
     # Measurement (yield rows only).
-    Z = ss.Z[:n, :3]
-    sya, sxx = st.sya[:n, :3], st.sxx[:n, :3, :3]
+    nf = p.nf
+    Z = ss.Z[:n, :nf]
+    sya, sxx = st.sya[:n, :nf], st.sxx[:n, :nf, :nf]
     S = st.syy[:n] - 2.0 * np.einsum("jk,jk->j", Z, sya) + np.einsum("jk,jkl,jl->j", Z, sxx, Z)
     g_logh = -0.5 * (st.n_i[:n] - S / p.h)
 
@@ -415,17 +423,18 @@ def em_update(p: DNSParams, st: SmootherStats, tau, h_min: float = 1e-10,
         A = np.linalg.solve(Z00.T, Z10.T).T
         Q = (Z11 - A @ Z10.T) / M
     Q = (Q + Q.T) / 2
-    Z = ns_loadings(tau, p.lam)
-    S = st.syy[:n] - 2.0 * np.einsum("jk,jk->j", Z, st.sya[:n, :3]) \
-        + np.einsum("jk,jkl,jl->j", Z, st.sxx[:n, :3, :3], Z)
+    nf = p.nf
+    Z = ns_loadings(tau, p.lam, p.lam2)
+    S = st.syy[:n] - 2.0 * np.einsum("jk,jk->j", Z, st.sya[:n, :nf]) \
+        + np.einsum("jk,jkl,jl->j", Z, st.sxx[:n, :nf, :nf], Z)
     h = np.maximum(S / np.maximum(st.n_i[:n], 1.0), h_min)
     if mu_fixed is not None:
-        return DNSParams(mu=mu_fixed.copy(), A=A, Q=Q, h=h, lam=p.lam)
+        return DNSParams(mu=mu_fixed.copy(), A=A, Q=Q, h=h, lam=p.lam, lam2=p.lam2)
     try:
         mu = np.linalg.solve(np.eye(k) - A, c)
     except np.linalg.LinAlgError:
         mu = p.mu
-    return DNSParams(mu=mu, A=A, Q=Q, h=h, lam=p.lam)
+    return DNSParams(mu=mu, A=A, Q=Q, h=h, lam=p.lam, lam2=p.lam2)
 
 
 def fit_dns_mle(
@@ -441,6 +450,7 @@ def fit_dns_mle(
     shrink_tau: float | None = None,
     mu: str = "sample",
     rw_tau: float | None = None,
+    lam2: float | None = None,
     **kwargs,
 ) -> DNSFit:
     """Maximum-likelihood estimation of the DNS state-space model (yields only, or yields + macro).
@@ -485,18 +495,20 @@ def fit_dns_mle(
     ycols, mcols = split_columns(data.columns)
     data = data[ycols + mcols]
     n = len(ycols)
-    p0 = start or two_step_start(data, lam)
+    if lam2 is not None and estimate_lambda:
+        raise ValueError("lambda is fixed in the Svensson (lam2) model")
+    p0 = start or two_step_start(data, lam, lam2)
     if mu == "sample":
-        kwargs["mu_fixed"] = sample_mean(data, lam)
-        p0 = DNSParams(kwargs["mu_fixed"].copy(), p0.A, p0.Q, p0.h, p0.lam)
+        kwargs["mu_fixed"] = sample_mean(data, lam, p0.lam2)
+        p0 = DNSParams(kwargs["mu_fixed"].copy(), p0.A, p0.Q, p0.h, p0.lam, p0.lam2)
     elif mu != "mle":
         raise ValueError(f"mu must be 'sample' or 'mle', not {mu!r}")
     if shrink_tau is not None and rw_tau is not None:
         raise ValueError("choose one prior: shrink_tau (cross terms to zero) or rw_tau (random walk)")
     if shrink_tau is not None and mcols:
-        kwargs["shrink"] = (float(shrink_tau), np.sqrt(np.diag(two_step_start(data, lam).Q)), "cross")
+        kwargs["shrink"] = (float(shrink_tau), np.sqrt(np.diag(two_step_start(data, lam, lam2).Q)), "cross")
     if rw_tau is not None:
-        kwargs["shrink"] = (float(rw_tau), np.sqrt(np.diag(two_step_start(data, lam).Q)), "rw")
+        kwargs["shrink"] = (float(rw_tau), np.sqrt(np.diag(two_step_start(data, lam, lam2).Q)), "rw")
     if n_starts <= 1:
         return _fit_from(data, n, p0, estimate_lambda, lam, h_floor_bp, **kwargs)
 
@@ -507,7 +519,7 @@ def fit_dns_mle(
     rng = np.random.default_rng(seed)
     starts = [p0] + [_perturb(p0, rng) for _ in range(n_starts - 1)]
     if "mu_fixed" in kwargs:  # perturb everything except the fixed mean
-        starts = [DNSParams(p0.mu.copy(), q.A, q.Q, q.h, q.lam) for q in starts]
+        starts = [DNSParams(p0.mu.copy(), q.A, q.Q, q.h, q.lam, q.lam2) for q in starts]
     t0 = time.perf_counter()
     scouted = [_fit_from(data, n, p, estimate_lambda, lam, h_floor_bp, maxiter=prune_iters, max_restarts=1,
                          **{k: v for k, v in kwargs.items() if k not in ("maxiter", "max_restarts")})
@@ -535,7 +547,8 @@ def _perturb(p: DNSParams, rng) -> DNSParams:
     if np.max(np.abs(np.linalg.eigvals(A))) >= 0.999:
         A = p.A
     return DNSParams(mu=p.mu + rng.normal(scale=1.0, size=k), A=A, Q=p.Q * np.exp(rng.normal(scale=0.5)),
-                     h=p.h * np.exp(rng.normal(scale=1.0, size=p.h.size)), lam=p.lam * np.exp(rng.normal(scale=0.2)))
+                     h=p.h * np.exp(rng.normal(scale=1.0, size=p.h.size)), lam=p.lam * np.exp(rng.normal(scale=0.2)),
+                     lam2=p.lam2)
 
 
 def _fit_from(
@@ -567,8 +580,8 @@ def _fit_from(
     Y = data.to_numpy(float)
     n_obs = int(np.isfinite(Y).sum())
     h_min = (h_floor_bp / 100.0) ** 2 if h_floor_bp else 1e-10
-    p = DNSParams(p.mu, p.A, p.Q, np.maximum(p.h, h_min), p.lam if estimate_lambda else lam)
-    k = p.k
+    p = DNSParams(p.mu, p.A, p.Q, np.maximum(p.h, h_min), p.lam if estimate_lambda else lam, p.lam2)
+    k, lam2 = p.k, p.lam2
 
     # Phase 1: EM.
     prev = -np.inf
@@ -590,7 +603,7 @@ def _fit_from(
     restrict = False  # set for the repair run below
 
     def fun(theta):
-        q = DNSParams.from_vector(theta, n, estimate_lambda, lam, k)
+        q = DNSParams.from_vector(theta, n, estimate_lambda, lam, k, lam2)
         if restrict and (not np.all(np.isfinite(q.A)) or spectral_radius(q.A) >= MAX_RADIUS):
             return 1e6, np.zeros_like(theta)  # outside the stationary region: rejected, the line search backs off
         ss = q.statespace(tau)
@@ -641,9 +654,9 @@ def _fit_from(
     # stationary A, where the stationary prior keeps it inside.
     res, restarts = optimise(theta0)
     note = ""
-    A_end = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k).A
+    A_end = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k, lam2).A
     if not np.all(np.isfinite(A_end)) or spectral_radius(A_end) >= MAX_RADIUS:
-        q = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k)
+        q = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k, lam2)
         q.A = q.A * 0.99 * MAX_RADIUS / spectral_radius(q.A) if np.all(np.isfinite(q.A)) else p.A * 0.95
         restrict = True
         res, restarts = optimise(q.to_vector(estimate_lambda))
@@ -654,7 +667,7 @@ def _fit_from(
         # unit root). A wall that rejects trial points is a poor way to optimise along
         # it (line searches stop wherever they hit it), so optimise on the boundary
         # surface itself, with A = cap * B / rho(B) and B free, and keep the better fit.
-        A_res = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k).A
+        A_res = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k, lam2).A
         if spectral_radius(A_res) > MAX_RADIUS - 1e-4:
             cap = MAX_RADIUS * (1.0 - 1e-9)  # on the cap, just inside the rejection test
 
@@ -680,7 +693,7 @@ def _fit_from(
                 res_b.x = on_boundary(res_b.x)
                 res, restarts = res_b, restarts_b
                 note = " [ended explosive: optimised on the stationarity boundary]"
-    params = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k)
+    params = DNSParams.from_vector(res.x, n, estimate_lambda, lam, k, lam2)
     pen = shrinkage_prior(params, *shrink)[0] if shrink is not None else 0.0
     return DNSFit(params=params, loglik=-res.fun * n_obs - pen,
                   n_params=theta0.size - (k if mu_fixed is not None else 0), nobs=n_obs,

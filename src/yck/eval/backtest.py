@@ -91,14 +91,15 @@ def _fit_to_json(fit) -> dict:
                 "lam": p.lam, "lb": fit.lb, "kappa": fit.kappa, "linear_loglik": fit.linear_loglik,
                 **{k: getattr(fit, k) for k in ("loglik", "n_params", "nobs", "converged", "message", "seconds",
                                                  "columns")}}
-    return {"mu": p.mu.tolist(), "A": p.A.tolist(), "Q": p.Q.tolist(), "h": p.h.tolist(), "lam": p.lam,
+    return {"mu": p.mu.tolist(), "A": p.A.tolist(), "Q": p.Q.tolist(), "h": p.h.tolist(), "lam": p.lam, "lam2": p.lam2,
             "loglik": fit.loglik, "n_params": fit.n_params, "nobs": fit.nobs, "converged": fit.converged,
             "message": fit.message, "seconds": fit.seconds, "columns": fit.columns,
             "estimate_lambda": fit.estimate_lambda, "penalty": fit.penalty, "mu_fixed": fit.mu_fixed}
 
 
 def _fit_from_json(d: dict):
-    params = DNSParams(mu=np.array(d["mu"]), A=np.array(d["A"]), Q=np.array(d["Q"]), h=np.array(d["h"]), lam=d["lam"])
+    params = DNSParams(mu=np.array(d["mu"]), A=np.array(d["A"]), Q=np.array(d["Q"]), h=np.array(d["h"]), lam=d["lam"],
+                       lam2=d.get("lam2"))
     if d.get("kind") == "shadow":
         return ShadowFit(params=params, lb=d["lb"], kappa=d["kappa"], linear_loglik=d["linear_loglik"],
                          **{k: d[k] for k in ("loglik", "n_params", "nobs", "converged", "message", "seconds",
@@ -127,7 +128,7 @@ def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> 
 
 
 def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lambda, lam, h_floor_bp, n_starts,
-                macro, shrink_tau, endpoint=None, shadow=None, rw_tau=None):
+                macro, shrink_tau, endpoint=None, shadow=None, rw_tau=None, lam2=None):
     """What a Kalman backtest re-estimates: (y, origins, refit dates, fit settings, panel function).
 
     With an `endpoint`, the estimation sample starts at its first available
@@ -143,6 +144,8 @@ def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lamb
         settings["shrink_tau"] = shrink_tau  # only added when used, so existing cache keys stay valid
     if rw_tau is not None:
         settings["rw_tau"] = rw_tau
+    if lam2 is not None:
+        settings["lam2"] = lam2
     if shadow is not None:
         if macro is not None or endpoint is not None or estimate_lambda:
             raise ValueError("the shadow-rate model is yields only, lambda fixed, without an endpoint")
@@ -158,7 +161,7 @@ def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lamb
 
 def _fit_cost(sample: pd.DataFrame, settings: dict) -> float:
     """Rough relative cost of one re-estimation: months x states^2, more with lambda or shrinkage."""
-    k = 3 + sum(1 for c in sample.columns if not str(c).endswith("m"))
+    k = (3 if settings.get("lam2") is None else 4) + sum(1 for c in sample.columns if not str(c).endswith("m"))
     return len(sample) * k * k * (1.5 if settings.get("estimate_lambda") else 1.0) * (
         1.5 if "shrink_tau" in settings or "rw_tau" in settings else 1.0) * (4.0 if settings.get("model") == "shadow" else 1.0)
 
@@ -179,10 +182,10 @@ def prefit(specs: list[dict], jobs: int, cache_dir: str | Path, verbose: bool = 
     for spec in specs:
         kw = {k: v for k, v in spec.items() if k in ("first_origin", "est_start", "reestimate_every",
                                                       "estimate_lambda", "lam", "h_floor_bp", "n_starts",
-                                                      "macro", "shrink_tau", "endpoint", "shadow", "rw_tau")}
+                                                      "macro", "shrink_tau", "endpoint", "shadow", "rw_tau", "lam2")}
         full = {"first_origin": "2000-01-31", "est_start": None, "reestimate_every": 12, "estimate_lambda": False,
                 "lam": DL_LAMBDA, "h_floor_bp": 1.0, "n_starts": 6, "macro": None, "shrink_tau": None,
-                "endpoint": None, "shadow": None, "rw_tau": None, **kw}
+                "endpoint": None, "shadow": None, "rw_tau": None, "lam2": None, **kw}
         _, _, refit_at, settings, panel = _refit_plan(spec["yields"], **full)
         for t in refit_at:
             sample = panel(t)
@@ -225,6 +228,7 @@ def dns_kalman_forecasts(
     anchor_columns=("3m", "6m", "9m", "12m"),
     shadow: str | None = None,
     rw_tau: float | None = None,
+    lam2: float | None = None,
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
@@ -276,10 +280,12 @@ def dns_kalman_forecasts(
       only.
     - `rw_tau`: the Minnesota random-walk prior on A (`fit_dns_mle`), with
       its own refits.
+    - `lam2`: the 4-factor dynamic Svensson model (second curvature with
+      decay lam2), with its own refits.
     """
     y, origins, refit_at, settings, panel = _refit_plan(yields, first_origin, est_start, reestimate_every,
                                                         estimate_lambda, lam, h_floor_bp, n_starts, macro, shrink_tau,
-                                                        endpoint, shadow, rw_tau)
+                                                        endpoint, shadow, rw_tau, lam2)
     cache = str(cache_dir) if cache_dir else None
     samples = [panel(t) for t in refit_at]
 

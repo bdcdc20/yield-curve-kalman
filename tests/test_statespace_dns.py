@@ -414,3 +414,43 @@ def test_rw_prior_gradient_and_tight_prior_gives_a_random_walk():
     np.testing.assert_allclose(loose.params.A, free.params.A, atol=2e-3)
     with pytest.raises(ValueError):
         fit_dns_mle(y, rw_tau=0.1, shrink_tau=0.1)
+
+
+# --------------------------------------------------------------------------- dynamic Svensson (step 7b item 8)
+def test_svensson_loadings_extend_nelson_siegel():
+    tau = np.array([3.0, 24.0, 120.0])
+    X3, X4 = ns_loadings(tau, 0.0609), ns_loadings(tau, 0.0609, 0.02)
+    assert X4.shape == (3, 4)
+    np.testing.assert_allclose(X4[:, :3], X3)
+    x = 0.02 * tau
+    np.testing.assert_allclose(X4[:, 3], (1 - np.exp(-x)) / x - np.exp(-x))
+
+
+def test_svensson_model_fits_svensson_data_better_and_nests_the_layout():
+    rng = np.random.default_rng(4)
+    lam2 = 0.2
+    p = DNSParams(mu=np.array([5.0, -1.5, 0.0, 0.0]), A=np.diag([0.97, 0.92, 0.85, 0.8]),
+                  Q=np.diag([0.09, 0.16, 0.36, 0.5]), h=np.full(len(GRID), 0.03**2), lam=0.0609, lam2=lam2)
+    ss = p.statespace(GRID)
+    assert ss.Z.shape == (len(GRID), 4)
+    f = np.empty((300, 4)); f[0] = p.mu
+    for t in range(1, 300):
+        f[t] = ss.c + p.A @ f[t - 1] + np.sqrt(np.diag(p.Q)) * rng.normal(size=4)
+    y = pd.DataFrame(f @ ss.Z.T + rng.normal(size=(300, len(GRID))) * 0.03,
+                     index=pd.date_range("1990-01-31", periods=300, freq="ME"), columns=COLS)
+    sv, ns = fit_dns_mle(y, lam2=lam2), fit_dns_mle(y)
+    assert sv.params.k == 4 and sv.state_names[-1] == "curvature2"
+    assert sv.loglik > ns.loglik + 50
+    assert sv.forecast(sv.filtered_states(y)[-1], 6).shape == (len(GRID),)
+
+
+def test_svensson_backtest_cache_round_trip(tmp_path):
+    from yck.eval.backtest import dns_kalman_forecasts
+    y, _ = _simulate(TRUE, N=130)
+    kw = dict(horizons=(1, 6), first_origin=y.index[118], reestimate_every=12, n_starts=1, lam2=0.2)
+    fits = []
+    a = dns_kalman_forecasts(y, cache_dir=tmp_path, fits=fits, **kw)
+    assert fits[0][1].params.lam2 == 0.2
+    b = dns_kalman_forecasts(y, cache_dir=tmp_path, **kw)
+    for h in (1, 6):
+        pd.testing.assert_frame_equal(a[h], b[h])
