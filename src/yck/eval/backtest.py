@@ -24,6 +24,7 @@ import pandas as pd
 
 from yck.model.adjust import anchor_mean, detrend, error_forecast, fit_error_ar, yield_forecast_cov
 from yck.model.dns import DL_LAMBDA, fit_factors, maturities_from_columns, ns_loadings, recursive_dynamics
+from yck.model.shadow import KAPPA, ShadowFit, fit_shadow_dns
 from yck.model.statespace_dns import DNSFit, DNSParams, fit_dns_mle
 
 
@@ -83,16 +84,25 @@ def _cache_key(sample: pd.DataFrame, settings: dict) -> str:
     return h.hexdigest()[:24]
 
 
-def _fit_to_json(fit: DNSFit) -> dict:
+def _fit_to_json(fit) -> dict:
     p = fit.params
+    if isinstance(fit, ShadowFit):
+        return {"kind": "shadow", "mu": p.mu.tolist(), "A": p.A.tolist(), "Q": p.Q.tolist(), "h": p.h.tolist(),
+                "lam": p.lam, "lb": fit.lb, "kappa": fit.kappa, "linear_loglik": fit.linear_loglik,
+                **{k: getattr(fit, k) for k in ("loglik", "n_params", "nobs", "converged", "message", "seconds",
+                                                 "columns")}}
     return {"mu": p.mu.tolist(), "A": p.A.tolist(), "Q": p.Q.tolist(), "h": p.h.tolist(), "lam": p.lam,
             "loglik": fit.loglik, "n_params": fit.n_params, "nobs": fit.nobs, "converged": fit.converged,
             "message": fit.message, "seconds": fit.seconds, "columns": fit.columns,
             "estimate_lambda": fit.estimate_lambda, "penalty": fit.penalty, "mu_fixed": fit.mu_fixed}
 
 
-def _fit_from_json(d: dict) -> DNSFit:
+def _fit_from_json(d: dict):
     params = DNSParams(mu=np.array(d["mu"]), A=np.array(d["A"]), Q=np.array(d["Q"]), h=np.array(d["h"]), lam=d["lam"])
+    if d.get("kind") == "shadow":
+        return ShadowFit(params=params, lb=d["lb"], kappa=d["kappa"], linear_loglik=d["linear_loglik"],
+                         **{k: d[k] for k in ("loglik", "n_params", "nobs", "converged", "message", "seconds",
+                                              "columns")})
     return DNSFit(params=params, penalty=d.get("penalty", 0.0), mu_fixed=d.get("mu_fixed", False),
                   **{k: d[k] for k in ("loglik", "n_params", "nobs", "converged", "message",
                                        "seconds", "columns", "estimate_lambda")})
@@ -103,7 +113,12 @@ def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> 
     path = Path(cache_dir) / f"{_cache_key(sample, settings)}.json" if cache_dir else None
     if path is not None and path.exists():
         return _fit_from_json(json.loads(path.read_text()))
-    fit = fit_dns_mle(sample, **settings)
+    if settings.get("model") == "shadow":  # EKF ML from the (cached) linear fit of the same sample
+        linear = _fit_origin(sample, {k: v for k, v in settings.items() if k not in ("model", "kappa")}, cache_dir)
+        fit = fit_shadow_dns(sample, linear.params, linear.loglik, kappa=settings["kappa"],
+                             h_floor_bp=settings["h_floor_bp"])
+    else:
+        fit = fit_dns_mle(sample, **settings)
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(_fit_to_json(fit)))
@@ -111,7 +126,7 @@ def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> 
 
 
 def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lambda, lam, h_floor_bp, n_starts,
-                macro, shrink_tau, endpoint=None):
+                macro, shrink_tau, endpoint=None, shadow=None):
     """What a Kalman backtest re-estimates: (y, origins, refit dates, fit settings, panel function).
 
     With an `endpoint`, the estimation sample starts at its first available
@@ -125,6 +140,10 @@ def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lamb
     settings = {"estimate_lambda": estimate_lambda, "lam": lam, "h_floor_bp": h_floor_bp, "n_starts": n_starts}
     if shrink_tau is not None:
         settings["shrink_tau"] = shrink_tau  # only added when used, so existing cache keys stay valid
+    if shadow is not None:
+        if macro is not None or endpoint is not None or estimate_lambda:
+            raise ValueError("the shadow-rate model is yields only, lambda fixed, without an endpoint")
+        settings.update(model="shadow", kappa=KAPPA)
 
     def panel(t):
         """Everything a forecaster had at origin t."""
@@ -138,7 +157,7 @@ def _fit_cost(sample: pd.DataFrame, settings: dict) -> float:
     """Rough relative cost of one re-estimation: months x states^2, more with lambda or shrinkage."""
     k = 3 + sum(1 for c in sample.columns if not str(c).endswith("m"))
     return len(sample) * k * k * (1.5 if settings.get("estimate_lambda") else 1.0) * (
-        1.5 if "shrink_tau" in settings else 1.0)
+        1.5 if "shrink_tau" in settings else 1.0) * (4.0 if settings.get("model") == "shadow" else 1.0)
 
 
 def prefit(specs: list[dict], jobs: int, cache_dir: str | Path, verbose: bool = False) -> int:
@@ -157,10 +176,10 @@ def prefit(specs: list[dict], jobs: int, cache_dir: str | Path, verbose: bool = 
     for spec in specs:
         kw = {k: v for k, v in spec.items() if k in ("first_origin", "est_start", "reestimate_every",
                                                       "estimate_lambda", "lam", "h_floor_bp", "n_starts",
-                                                      "macro", "shrink_tau", "endpoint")}
+                                                      "macro", "shrink_tau", "endpoint", "shadow")}
         full = {"first_origin": "2000-01-31", "est_start": None, "reestimate_every": 12, "estimate_lambda": False,
                 "lam": DL_LAMBDA, "h_floor_bp": 1.0, "n_starts": 6, "macro": None, "shrink_tau": None,
-                "endpoint": None, **kw}
+                "endpoint": None, "shadow": None, **kw}
         _, _, refit_at, settings, panel = _refit_plan(spec["yields"], **full)
         for t in refit_at:
             sample = panel(t)
@@ -201,6 +220,7 @@ def dns_kalman_forecasts(
     error_ar: str | None = None,
     anchor: pd.DataFrame | None = None,
     anchor_columns=("3m", "6m", "9m", "12m"),
+    shadow: str | None = None,
 ) -> dict[int, pd.DataFrame]:
     """One-step (Kalman, maximum-likelihood) DNS forecasts from every origin.
 
@@ -246,10 +266,14 @@ def dns_kalman_forecasts(
       (`yck.model.adjust.anchor_mean`), using the model's forecast covariance
       from P_{t|t}. Forwards whose inputs are missing are not used. Also no
       re-estimation.
+    - `shadow` ('plugin' or 'mean'): the smooth shadow-rate model
+      (`yck.model.shadow`), estimated by EKF maximum likelihood from the
+      linear fit, with forecasts through the measurement function. Yields
+      only.
     """
     y, origins, refit_at, settings, panel = _refit_plan(yields, first_origin, est_start, reestimate_every,
                                                         estimate_lambda, lam, h_floor_bp, n_starts, macro, shrink_tau,
-                                                        endpoint)
+                                                        endpoint, shadow)
     cache = str(cache_dir) if cache_dir else None
     samples = [panel(t) for t in refit_at]
 
@@ -275,8 +299,8 @@ def dns_kalman_forecasts(
         n = len(y.columns)
         Z = ss.Z[:n]
 
-        def states(d):  # filtered states, plus their covariances when anchoring needs them
-            if anchor is None:
+        def states(d):  # filtered states, plus their covariances when anchoring or the shadow forecast needs them
+            if anchor is None and shadow is None:
                 return fit.filtered_states(d), None
             r = fit.filter(d)
             return r.a_filt, r.P_filt
@@ -293,10 +317,10 @@ def dns_kalman_forecasts(
             i = pos[t]
             if error_ar is not None:  # residuals up to the origin only
                 Yt = data[y.columns].to_numpy(float)[:i + 1]
-                resid = Yt - a[:i + 1] @ Z.T
+                resid = Yt - fit.fitted(a[:i + 1])
                 m, rho = fit_error_ar(resid, error_ar)
             for h in horizons:
-                f = fit.forecast(a[i], h) + shift[i]
+                f = (fit.forecast(a[i], h, P[i], shadow) if shadow else fit.forecast(a[i], h)) + shift[i]
                 if error_ar is not None:
                     f = f + error_forecast(m, rho, resid[-1], h)
                 if anchor is not None:

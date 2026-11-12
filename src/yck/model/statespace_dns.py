@@ -253,6 +253,10 @@ class DNSFit:
         a_s, _ = rts_smoother(ss, kalman_filter(ss, data[self.columns].to_numpy(float)))
         return pd.DataFrame(a_s, index=data.index, columns=self.state_names)
 
+    def fitted(self, a: np.ndarray) -> np.ndarray:
+        """Model yields at the states in the rows of a (yield maturities only)."""
+        return np.atleast_2d(a) @ self.statespace().Z[:len(self.yield_columns)].T
+
     def forecast(self, a_filt_t, h: int) -> np.ndarray:
         """Yield forecast y_{t+h|t} at the yield maturities, from the filtered state at t."""
         ss = self.statespace()
