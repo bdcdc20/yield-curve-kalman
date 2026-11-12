@@ -84,3 +84,19 @@ def test_shadow_backtest_no_look_ahead_and_cache_round_trip(tmp_path):
     for h in (1, 6):
         t = origin + pd.offsets.MonthEnd(h)
         pd.testing.assert_series_equal(base[h].loc[t], after[h].loc[t], atol=1e-8)
+
+
+def test_ansley_kohn_map_is_stationary_and_inverts():
+    from yck.model.kalman import lyapunov
+    from yck.model.shadow import free_from_stationary, stationary_from_free
+    rng = np.random.default_rng(3)
+    for _ in range(20):
+        B = rng.normal(scale=3.0, size=(3, 3))
+        L = np.tril(rng.normal(size=(3, 3)))
+        np.fill_diagonal(L, np.abs(np.diag(L)) + 0.1)
+        A, V = stationary_from_free(B, L)
+        Q = L @ L.T
+        assert np.max(np.abs(np.linalg.eigvals(A))) < 1
+        np.testing.assert_allclose(V, A @ V @ A.T + Q, atol=1e-9)
+        A2, _ = stationary_from_free(free_from_stationary(A, Q), L)
+        np.testing.assert_allclose(A2, A, atol=1e-8)

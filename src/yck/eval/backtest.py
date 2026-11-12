@@ -24,7 +24,7 @@ import pandas as pd
 
 from yck.model.adjust import anchor_mean, detrend, error_forecast, fit_error_ar, yield_forecast_cov
 from yck.model.dns import DL_LAMBDA, fit_factors, maturities_from_columns, ns_loadings, recursive_dynamics
-from yck.model.shadow import KAPPA, ShadowFit, fit_shadow_dns
+from yck.model.shadow import KAPPA, SHADOW_FIT_VERSION, ShadowFit, fit_shadow_dns
 from yck.model.statespace_dns import DNSFit, DNSParams, fit_dns_mle
 
 
@@ -114,7 +114,8 @@ def _fit_origin(sample: pd.DataFrame, settings: dict, cache_dir: str | None) -> 
     if path is not None and path.exists():
         return _fit_from_json(json.loads(path.read_text()))
     if settings.get("model") == "shadow":  # EKF ML from the (cached) linear fit of the same sample
-        linear = _fit_origin(sample, {k: v for k, v in settings.items() if k not in ("model", "kappa")}, cache_dir)
+        linear = _fit_origin(sample, {k: v for k, v in settings.items()
+                                      if k not in ("model", "kappa", "shadow_version")}, cache_dir)
         fit = fit_shadow_dns(sample, linear.params, linear.loglik, kappa=settings["kappa"],
                              h_floor_bp=settings["h_floor_bp"])
     else:
@@ -143,7 +144,7 @@ def _refit_plan(yields, first_origin, est_start, reestimate_every, estimate_lamb
     if shadow is not None:
         if macro is not None or endpoint is not None or estimate_lambda:
             raise ValueError("the shadow-rate model is yields only, lambda fixed, without an endpoint")
-        settings.update(model="shadow", kappa=KAPPA)
+        settings.update(model="shadow", kappa=KAPPA, shadow_version=SHADOW_FIT_VERSION)
 
     def panel(t):
         """Everything a forecaster had at origin t."""

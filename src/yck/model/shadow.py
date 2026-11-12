@@ -25,6 +25,12 @@ Choices (fixed before running, README section 8 step 7b):
   in real time at each refit.
 - mu fixed at the real-time sample mean of the two-step factors, as for DNS.
 - Start: the linear DNS maximum-likelihood fit of the same sample.
+- Stationarity by the Ansley & Kohn (1986) reparameterisation, as in the
+  paper (`stationary_from_free`): every parameter vector maps to a
+  stationary VAR, so the optimiser never meets a rejection wall. A first
+  version rejected explosive A with a penalty value instead; near the unit
+  root, where the shadow model's level wants to be, L-BFGS-B's line
+  searches then failed and stopped up to 60 log-likelihood points short.
 
 Forecasts. The identity kappa f(x / kappa) = E[max(0, x + kappa Z)], Z ~ N(0, 1)
 gives two versions: `plugin` puts the forecast shadow curve into the
@@ -44,11 +50,12 @@ from numba import njit
 from scipy.optimize import minimize
 from scipy.stats import norm
 
-from yck.model.dns import maturities_from_columns
+from yck.model.dns import maturities_from_columns, ns_loadings
 from yck.model.kalman import StateSpace
-from yck.model.statespace_dns import MAX_RADIUS, DNSParams, sample_mean, spectral_radius, split_columns
+from yck.model.statespace_dns import DNSParams, sample_mean, split_columns
 
 KAPPA = 1.0  # smoothness of the lower bound, percentage points
+SHADOW_FIT_VERSION = 2  # in the shadow fits' cache key; bump when this estimator changes (2: Ansley-Kohn map)
 
 
 def zlb_yield(s, lb: float, kappa: float = KAPPA):
@@ -60,6 +67,42 @@ def zlb_yield(s, lb: float, kappa: float = KAPPA):
 def lower_bound(yields: pd.DataFrame) -> float:
     """r_LB = min(0, lowest yield observed in the sample): known at the origin."""
     return float(min(0.0, np.nanmin(yields.to_numpy(float))))
+
+
+def _sym_sqrt(M: np.ndarray, power: float) -> np.ndarray:
+    w, V = np.linalg.eigh((M + M.T) / 2)
+    return (V * w ** power) @ V.T
+
+
+def stationary_from_free(B: np.ndarray, L_Q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Ansley-Kohn map for a VAR(1): free B (k x k) and Q's Cholesky factor -> (stationary A, its V = Var(x)).
+
+    P = (I + BB')^{-1/2} B has singular values < 1. With R = chol((I + BB')^{-1}) and L_V = L_Q R^{-1},
+    A = L_V P L_V^{-1} satisfies V = A V A' + Q for V = L_V L_V', and A is similar to P, so its spectral
+    radius is below 1.
+    """
+    k = B.shape[0]
+    M = np.eye(k) + B @ B.T
+    P = _sym_sqrt(M, -0.5) @ B
+    R = np.linalg.cholesky(np.linalg.inv(M))
+    L_V = L_Q @ np.linalg.inv(R)
+    return L_V @ P @ np.linalg.inv(L_V), L_V @ L_V.T
+
+
+def free_from_stationary(A: np.ndarray, Q: np.ndarray) -> np.ndarray:
+    """Inverse of `stationary_from_free` for a stationary A (B for the Cholesky factor of Q)."""
+    from yck.model.kalman import lyapunov
+    L_Q = np.linalg.cholesky(Q)
+    L_V = np.linalg.cholesky(lyapunov(A, Q))
+    # Rotate L_V so that L_V R = L_Q with R lower triangular: L_V = L_Q R^{-1}, R from M = (I + BB')^{-1}.
+    P0 = np.linalg.solve(L_V, A @ L_V)
+    Mi = np.eye(A.shape[0]) - P0 @ P0.T  # = (I + BB')^{-1} for this square root of V
+    R0 = np.linalg.solve(L_V, L_Q)  # L_V R0 = L_Q, R0 R0' = Mi, but R0 need not be triangular
+    # Orthogonal U with R0 = R U' (R = chol(Mi)); the matching square root of V is L_V U.
+    R = np.linalg.cholesky(Mi)
+    U = np.linalg.solve(R, R0).T
+    P = U.T @ P0 @ U
+    return _sym_sqrt(np.eye(A.shape[0]) - P @ P.T, -0.5) @ P
 
 
 @njit(cache=True)
@@ -196,19 +239,33 @@ def fit_shadow_dns(data: pd.DataFrame, start: DNSParams, linear_loglik: float = 
     lb = lower_bound(data[ycols]) if lb is None else lb
     mu = sample_mean(data, start.lam)
     h_min = (h_floor_bp / 100.0) ** 2 if h_floor_bp else 1e-10
-    p0 = DNSParams(mu, start.A, start.Q, np.maximum(start.h, h_min), start.lam)
-    theta0 = p0.to_vector()[k:]  # mu is not estimated
+    A0 = start.A
+    rad = np.max(np.abs(np.linalg.eigvals(A0)))
+    if rad >= 0.999:  # the map needs a strictly stationary start
+        A0 = A0 * 0.999 / rad
+    (rows, cols), diag = (np.tril_indices(k), None)
+    dmask = rows == cols
+    l0 = np.linalg.cholesky(start.Q)[rows, cols]
+    l0[dmask] = np.log(l0[dmask])
+    theta0 = np.concatenate([free_from_stationary(A0, start.Q).ravel(), l0, np.log(np.maximum(start.h, h_min))])
     nobs = int(np.isfinite(Y).sum())
+    tau_Z = ns_loadings(tau, start.lam)
 
     def unpack(th):
-        return DNSParams.from_vector(np.concatenate([mu, th]), n, False, start.lam, k)
+        B = th[:k * k].reshape(k, k)
+        l = th[k * k:k * k + rows.size].copy()
+        l[dmask] = np.exp(l[dmask])
+        L = np.zeros((k, k))
+        L[rows, cols] = l
+        A, V = stationary_from_free(B, L)
+        return DNSParams(mu, A, L @ L.T, np.exp(th[k * k + rows.size:]), start.lam), V
 
     def fun(th):
-        p = unpack(th)
-        if not np.all(np.isfinite(th)) or spectral_radius(p.A) >= MAX_RADIUS:
+        if not np.all(np.isfinite(th)):
             return 1e6
-        ss = p.statespace(tau)
-        ll, _, _ = _ekf(Y, ss.Z, np.diag(ss.H).copy(), ss.T, ss.Q, ss.c, ss.a1, ss.P1, lb, kappa, False)
+        p, V = unpack(th)
+        c = (np.eye(k) - p.A) @ mu
+        ll, _, _ = _ekf(Y, tau_Z, p.h, p.A, p.Q, c, mu.copy(), V, lb, kappa, False)
         return -ll / nobs if np.isfinite(ll) else 1e6
 
     o = k * k + k * (k + 1) // 2
@@ -224,7 +281,7 @@ def fit_shadow_dns(data: pd.DataFrame, start: DNSParams, linear_loglik: float = 
             th, best = res.x, res.fun
         if gain < 0.01:
             break
-    p = unpack(th)
+    p, _ = unpack(th)
     return ShadowFit(params=p, lb=lb, kappa=kappa, loglik=-fun(th) * nobs, n_params=th.size, nobs=nobs,
                      converged=bool(res.success), message=str(res.message), seconds=time.perf_counter() - t0,
                      columns=list(ycols), linear_loglik=linear_loglik)
