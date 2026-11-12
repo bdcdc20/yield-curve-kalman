@@ -108,17 +108,22 @@ def strategy_pnl(sig: pd.Series, pnl: pd.Series, h: int, sizing: str = "scaled",
 def summary(pnl: pd.Series, h: int) -> dict:
     """Annualised mean (bp per unit DV01), volatility, Sharpe ratio, t-statistic, hit rate, max drawdown.
 
-    Monthly P&L of h-month tranches overlaps, so the t-statistic of the mean
-    uses autocovariances up to lag h - 1 (as the DM test does). The Sharpe ratio
-    is mean / sd of the monthly series times sqrt(12) (overlap does not bias it,
-    it only widens its sampling error).
+    Each monthly entry is 1/h of an h-month tranche's P&L (`strategy_pnl`), so:
+
+    - mean: 12 x the monthly mean (the totals match the running portfolio);
+    - volatility and Sharpe: those of an h-month return, annualised by
+      sqrt(12 / h): vol = sqrt(12 h) sd(monthly entries), Sharpe = sqrt(12 / h)
+      mean / sd. Annualising by sqrt(12) would treat each h-month return as a
+      one-month return and overstate the Sharpe ratio by sqrt(h);
+    - t-statistic of the mean: autocovariances up to lag h - 1, because
+      neighbouring tranches overlap (as in the DM test).
     """
     p = pnl.dropna()
     if len(p) < 12:
         return {k: np.nan for k in ("mean", "vol", "sharpe", "t", "hit", "max_dd", "months")}
     se = np.sqrt(long_run_var_of_mean(p.to_numpy(), h))
     cum = p.cumsum()
-    return {"mean": 12 * p.mean(), "vol": np.sqrt(12) * p.std(), "sharpe": np.sqrt(12) * p.mean() / p.std(),
+    return {"mean": 12 * p.mean(), "vol": np.sqrt(12 * h) * p.std(), "sharpe": np.sqrt(12 / h) * p.mean() / p.std(),
             "t": p.mean() / se if se > 0 else np.nan, "hit": float((p > 0).mean()),
             "max_dd": float((cum.cummax() - cum).max()), "months": len(p)}
 

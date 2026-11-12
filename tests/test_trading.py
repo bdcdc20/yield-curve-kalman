@@ -69,3 +69,14 @@ def test_summary_and_difference_test():
     q = p - 0.5 + 0.1 * rng.normal(size=600)
     d = difference_test(p, q, 1)
     assert d["diff"] == pytest.approx(12 * (p - q).mean()) and d["t"] > 5
+
+
+def test_sharpe_of_overlapping_tranches_is_annualised_by_sqrt_12_over_h():
+    # Non-overlapping 12-month returns with mean 1 and sd 2: annual Sharpe 0.5, whatever the bookkeeping.
+    rng = np.random.default_rng(3)
+    annual = 1.0 + 2.0 * rng.standard_normal(4000)
+    booked = pd.Series(annual / 12, index=pd.date_range("1000-01-31", periods=4000, freq="ME", unit="s"))
+    s = summary(booked, 12)
+    assert s["sharpe"] == pytest.approx(np.mean(annual) / np.std(annual, ddof=1), rel=1e-12)
+    assert s["vol"] == pytest.approx(np.std(annual, ddof=1), rel=1e-12)
+    assert s["mean"] == pytest.approx(np.mean(annual), rel=1e-12)
