@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 147 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
+| Offline tests | **Done.** 148 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -1144,6 +1144,27 @@ over plug-in/mean, with and without AR(1)):
      - Against the linear model with the same error model (DM).
      - Mean errors in the zero/low-rate years (USD 2009–15, EUR 2014–22,
        GBP 2009–21).
+     - The 90% model confidence set over all models.
+
+   **Grid for item 5, fixed on 12 Nov 2026 before any of it was run**
+   (`statespace_dns.py: rw_prior`, `eval/grid.py: rwprior_grid`;
+   `python -m yck backtest --ccy USD EUR GBP --rwprior`):
+
+   - **Prior.** A Minnesota random-walk prior on the whole of A, maximised
+     with the likelihood (MAP):
+     - own lags ~ N(1, τ²);
+     - cross lags ~ N(0, (0.5 τ s_i/s_j)²), with s the two-step shock sds;
+     - no prior on Q.
+
+     μ stays at the real-time sample mean; with A = I it drops out of the
+     forecast.
+   - **Grid.** τ ∈ {0.03, 0.1, 0.3}, on yields only and yields + policy
+     rate (λ fixed), each plain and with `ar1` errors: 12 backtests per
+     currency, 6 sets of refits.
+   - **Reporting.**
+     - Against forwards and the random walk (DM).
+     - Against the same model without the prior (DM).
+     - The largest eigenvalue of A across refits.
      - The 90% model confidence set over all models.
 
    Fixing failures 1 and 2 also matters for step 8: the trading signal is

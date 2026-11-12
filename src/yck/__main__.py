@@ -59,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--shadow", action="store_true",
                    help="step 7b item 6: smooth shadow-rate DNS (yields only), plug-in and exact-mean forecasts, "
                         "plain and with AR(1) errors")
+    b.add_argument("--rwprior", action="store_true",
+                   help="step 7b item 5: Minnesota random-walk prior on A (tau 0.03, 0.1, 0.3), yields only and "
+                        "policy rate, plain and with AR(1) errors")
     b.add_argument("--config", type=Path, default=ROOT / "config" / "data_sources.yaml")
     b.add_argument("--data-dir", type=Path, default=ROOT / "data")
     a = p.parse_args(argv)
@@ -85,9 +88,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _backtest(a) -> int:
-    from .eval.grid import STANDARD_GRID, accuracy_grid, anchor_grid, run_grid, shadow_grid
+    from .eval.grid import STANDARD_GRID, accuracy_grid, anchor_grid, run_grid, rwprior_grid, shadow_grid
 
-    if a.shadow:
+    if a.rwprior:
+        grid = rwprior_grid
+    elif a.shadow:
         grid = shadow_grid
     elif a.anchor:
         grid = anchor_grid
