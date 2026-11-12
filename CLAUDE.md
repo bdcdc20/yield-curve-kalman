@@ -47,8 +47,12 @@ evaluation protocol, the roadmap and the decisions already made.
   cache version (`SHADOW_FIT_VERSION`).
 - Step 7b item 5 is done (`rw_tau` in `fit_dns_mle`, `backtest --rwprior`,
   notebook 08, README §7.10): a tight random-walk prior helps EUR and the GBP
-  long end. Next: step 7b items 8 and 7, then the trading evaluation (step 8),
-  then the write-up (step 9). Fix each new grid in README §8 and commit it
+  long end.
+- Step 7b item 8 is done (`lam2` in `DNSParams`/`ns_loadings`, `backtest
+  --svensson`, notebook 09, README §7.11): a second, short-end curvature factor
+  fixes the short-end fit and the one-month forecasts. Next: step 7b item 7
+  (macro factors), then the trading evaluation (step 8), then the write-up
+  (step 9). Fix each new grid in README §8 and commit it
   before running it.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. `python -m yck backtest --ccy USD EUR GBP --all`

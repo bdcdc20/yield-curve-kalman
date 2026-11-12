@@ -92,7 +92,7 @@ real-time sample mean (§6.3).
 | Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
-| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–6 done: the shadow-rate DNS (`model/shadow.py`, notebook 07, §7.9) has large gains at the EUR short end, small in GBP, none in USD; the random-walk prior (notebook 08, §7.10) helps the EUR curve and GBP long end at τ = 0.03. Items 7–8 not started |
+| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–6 done: the shadow-rate DNS (`model/shadow.py`, notebook 07, §7.9) has large gains at the EUR short end, small in GBP, none in USD; the random-walk prior (notebook 08, §7.10) helps the EUR curve and GBP long end at τ = 0.03. Item 8 (dynamic Svensson, notebook 09, §7.11) done: a second, short-end curvature factor fixes the short-end fit and the one-month forecasts. Item 7 not started |
 | Trading evaluation | Not started (§7.5; after §8 step 7b) |
 | Final write-up | Not started (§8, step 9) |
 
@@ -218,6 +218,15 @@ a model confidence set covers every model in the project.
 - **EUR:** RMSE falls 7–16% at h = 6–12 at every maturity.
 - **GBP:** 5–10y fall 4–10%.
 - **USD:** almost no change, and the prior hurts the policy-rate model.
+
+**Step 7b item 8, dynamic Svensson (`notebooks/09_svensson.ipynb`, §7.11).**
+
+- **A fourth factor peaking at 9 months** cuts the short-end noise sd from
+  16–20 to 1–8 bp, and one-month errors by 13% (USD), 48% (EUR) and 14%
+  (GBP).
+- **GBP short end:** level with forwards at one month for the first time,
+  and the best GBP model at 6 months in the confidence set.
+- **A long-end hump** only repeats what the AR(1) errors do.
 
 ## 3. Repository layout
 
@@ -971,6 +980,39 @@ over plug-in/mean, with and without AR(1)):
   and GBP. The policy-rate model keeps no prior, and combination A is
   unchanged.
 
+### 7.11 Results: a second curvature factor (step 7b item 8)
+
+`notebooks/09_svensson.ipynb`; the grid was committed before the run.
+
+**RMSE of the 4-factor model ÷ the 3-factor model** (same error model,
+plain / with AR(1); DM):
+
+| | h = 1 | h = 6 | h = 12 |
+|---|---|---|---|
+| USD 3m, short hump | 0.87*** / 0.97 | 0.96 / 0.96 | 0.98 / 0.98 |
+| USD 10y, short hump | 0.99** / 1.00 | 0.97 / 0.97 | 0.96 / 0.95 |
+| EUR 3m, short hump | 0.52*** / 0.68*** | 0.80* / 0.81* | 1.02 / 1.02 |
+| GBP 6m, short hump | 0.86** / 0.96 | 0.91* / 0.86** | 0.96 / 0.94 |
+| USD 10y, long hump | 0.90*** / 1.00 | 1.00 / 0.99 | 1.01 / 0.99 |
+| EUR 10y, long hump | 1.06 / 1.00 | 1.16** / 1.01 | 1.11* / 1.03 |
+
+- **Fit.** At the last refit the short hump cuts the short-end noise sd
+  from 16–20 to 1–8 bp, and the long hump the 10y from 13–15 to 1–3 bp.
+  The log-likelihood gains are 1,275–5,801 points. The flagged long-hump
+  optimiser stops are flat optima: twice as many starts give the same
+  log-likelihood and identical forecasts.
+- **GBP.** At one month the 6m goes from 3.29 × forwards to 1.06 (not
+  significant). At 6 months the short-hump model is the best of 52 GBP
+  models on pooled loss (MCS p = 1.00).
+- **USD at h = 12:** 10y at 0.94–0.95 × forwards (not significant).
+- **EUR 1–2y at h = 12:** 9–13% worse.
+- **Long hump.** The 10y misfit is persistent but says nothing about where
+  the 10y is going: the long hump's one-month gain disappears with AR(1)
+  errors.
+- **For step 8:** the short-hump Svensson + AR(1) model is the pure-model
+  signal for USD and GBP. EUR keeps the shadow-rate model, and combination
+  A is unchanged.
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -1077,7 +1119,8 @@ over plug-in/mean, with and without AR(1)):
 
    Item 6 ✅ (§7.9): the shadow-rate model is adopted for EUR and GBP. Item 5
    ✅ (§7.10): the τ = 0.03 random-walk prior is adopted for the EUR/GBP long
-   end. Items 7 and 8 are not started. Fix the full grid of
+   end. Item 8 ✅ (§7.11): the short-hump dynamic Svensson model is adopted for
+   USD and GBP. Item 7 is not started. Fix the full grid of
    variants before running it, report every variant, and add a model
    confidence set across all models to the DM/CW tables, to avoid data
    snooping. Each step keeps real-time data and filtered states (§7.3).
