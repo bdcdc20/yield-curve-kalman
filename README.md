@@ -92,7 +92,7 @@ real-time sample mean (§6.3).
 | Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
-| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Item 6 (shadow-rate DNS, `model/shadow.py`, notebook 07, §7.9) done: large gains at the EUR short end, small in GBP, none in USD. Items 5, 7, 8 not started |
+| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–6 done: the shadow-rate DNS (`model/shadow.py`, notebook 07, §7.9) has large gains at the EUR short end, small in GBP, none in USD; the random-walk prior (notebook 08, §7.10) helps the EUR curve and GBP long end at τ = 0.03. Items 7–8 not started |
 | Trading evaluation | Not started (§7.5; after §8 step 7b) |
 | Final write-up | Not started (§8, step 9) |
 
@@ -210,6 +210,14 @@ a model confidence set covers every model in the project.
   It still loses to forwards.
 - **GBP:** small gains of 3–7%.
 - **USD:** none at 6–12 months.
+
+**Step 7b item 5, random-walk prior on A (`notebooks/08_rw_prior.ipynb`,
+§7.10).**
+
+- **Only the tightest prior (τ = 0.03) matters.**
+- **EUR:** RMSE falls 7–16% at h = 6–12 at every maturity.
+- **GBP:** 5–10y fall 4–10%.
+- **USD:** almost no change, and the prior hurts the policy-rate model.
 
 ## 3. Repository layout
 
@@ -934,6 +942,35 @@ over plug-in/mean, with and without AR(1)):
 - **For step 8:** shadow + AR(1) (plug-in) is the pure-model signal for EUR
   and GBP, the linear model for USD, and combination A is unchanged.
 
+### 7.10 Results: random-walk prior on the factor dynamics (step 7b item 5)
+
+`notebooks/08_rw_prior.ipynb`; the grid was committed before the run.
+
+**RMSE with the prior ÷ the same model without it**, τ = 0.03, h = 6 / 12
+(range over plain and AR(1) errors):
+
+| | Short end | 5y | 10y |
+|---|---|---|---|
+| USD, yields only | 1.05 / 1.02 | 0.96 / 0.95 | 0.96 / 0.95 |
+| USD, policy rate | 1.18 / 1.12 | 0.99 / 1.00 | 0.96–0.97 / 0.98 |
+| EUR, yields only | 0.87 / 0.91 | 0.89 / 0.89 | 0.91–0.93 / 0.91 |
+| EUR, policy rate | 0.85–0.86 / 0.86 | 0.91 / 0.88–0.89 | 0.91–0.92 / 0.91 |
+| GBP, yields only | 0.96–0.98 / 1.00 | 0.96 / 0.93 | 0.94–0.95 / 0.90–0.91 |
+
+- **τ = 0.1 and 0.3** stay within a few percent of the unrestricted model.
+- **EUR.** The gains are significant at 5–10% at most maturities. The 10y
+  at h = 6 reaches 0.94–0.96 × forwards (not significant). The short end
+  still loses to forwards (1.31–1.59) and to the random walk.
+- **GBP.** The 10y is level with forwards (0.97–1.01) but 4–8% behind the
+  random walk.
+- **USD, policy-rate model.** The prior removes the policy-rate → curve
+  links that made the model useful.
+- **Confidence set.** No separation at h = 6–12 (46–60 of 48–60 models
+  kept).
+- **For step 8:** yields only with τ = 0.03 is the long-end model for EUR
+  and GBP. The policy-rate model keeps no prior, and combination A is
+  unchanged.
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -1038,8 +1075,9 @@ over plug-in/mean, with and without AR(1)):
    - items 3–4 (§7.8): combination A with inverse-MSE weights adopted for
      step 8, anchoring not adopted.
 
-   Item 6 ✅ (§7.9): the shadow-rate model is adopted for EUR and GBP. Items
-   5, 7 and 8 are not started. Fix the full grid of
+   Item 6 ✅ (§7.9): the shadow-rate model is adopted for EUR and GBP. Item 5
+   ✅ (§7.10): the τ = 0.03 random-walk prior is adopted for the EUR/GBP long
+   end. Items 7 and 8 are not started. Fix the full grid of
    variants before running it, report every variant, and add a model
    confidence set across all models to the DM/CW tables, to avoid data
    snooping. Each step keeps real-time data and filtered states (§7.3).

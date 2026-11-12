@@ -44,8 +44,11 @@ evaluation protocol, the roadmap and the decisions already made.
   07, README §7.9): the smooth shadow-rate DNS by EKF, with the Ansley–Kohn
   stationary map. It helps the EUR short end a lot, GBP a little, and USD
   not at all; it is adopted for EUR and GBP. Shadow fits have their own
-  cache version (`SHADOW_FIT_VERSION`). Next: step 7b items 5, 8 and 7, then
-  the trading evaluation (step 8), then the write-up (step 9). Fix each new grid in README §8 and commit it
+  cache version (`SHADOW_FIT_VERSION`).
+- Step 7b item 5 is done (`rw_tau` in `fit_dns_mle`, `backtest --rwprior`,
+  notebook 08, README §7.10): a tight random-walk prior helps EUR and the GBP
+  long end. Next: step 7b items 8 and 7, then the trading evaluation (step 8),
+  then the write-up (step 9). Fix each new grid in README §8 and commit it
   before running it.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. `python -m yck backtest --ccy USD EUR GBP --all`
