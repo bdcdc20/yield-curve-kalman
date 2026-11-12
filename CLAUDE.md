@@ -39,9 +39,13 @@ evaluation protocol, the roadmap and the decisions already made.
   - combinations reach parity with forwards or better at the long end, but
     nothing beats the market significantly at h = 6–12.
 
-  Adopted for step 8: combination A (inverse MSE) and yields + AR(1). Next:
-  step 7b items 5–8 (README §8), or the trading evaluation (step 8), then
-  the write-up (step 9). Fix each new grid in README §8 and commit it
+  Adopted for step 8: combination A (inverse MSE) and yields + AR(1).
+- Step 7b item 6 is done (`model/shadow.py`, `backtest --shadow`, notebook
+  07, README §7.9): the smooth shadow-rate DNS by EKF, with the Ansley–Kohn
+  stationary map. It helps the EUR short end a lot, GBP a little, and USD
+  not at all; it is adopted for EUR and GBP. Shadow fits have their own
+  cache version (`SHADOW_FIT_VERSION`). Next: step 7b items 5, 8 and 7, then
+  the trading evaluation (step 8), then the write-up (step 9). Fix each new grid in README §8 and commit it
   before running it.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in
   `data/results/cache/`. `python -m yck backtest --ccy USD EUR GBP --all`
@@ -60,7 +64,7 @@ Run these from the repo root and fix anything that fails before starting work:
 ```bash
 python3 -m pip install -e ".[dev]"
 test -f .env || echo "MISSING .env: ask Bruno for his FRED key, then: echo 'FRED_API_KEY=<key>' > .env"
-python3 -m pytest -q                  # expect 146 passed
+python3 -m pytest -q                  # expect 147 passed
 python3 -m yck fetch                  # builds data/processed/ (data is not in git)
 cat data/processed/coverage.md
 ```

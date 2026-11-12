@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 146 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights), all passing (`pytest -q`) |
+| Offline tests | **Done.** 147 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -92,7 +92,7 @@ real-time sample mean (§6.3).
 | Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
-| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–8 not started (§8 step 7b) |
+| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Item 6 (shadow-rate DNS, `model/shadow.py`, notebook 07, §7.9) done: large gains at the EUR short end, small in GBP, none in USD. Items 5, 7, 8 not started |
 | Trading evaluation | Not started (§7.5; after §8 step 7b) |
 | Final write-up | Not started (§8, step 9) |
 
@@ -200,6 +200,17 @@ a model confidence set covers every model in the project.
   combination is best in USD at every horizon, forwards are best in EUR,
   and the random walk in GBP at h = 1 and 12.
 
+**Step 7b item 6, smooth shadow-rate DNS (`notebooks/07_shadow_rate.ipynb`,
+§7.9).** Opschoor & van der Wel's (2025) model, estimated by EKF.
+
+- **In sample** it gains +535 to +1,058 log-likelihood points once the
+  zero-rate years are in the sample.
+- **EUR:** short-end RMSE against the linear model is −26 to −33% at
+  h = 1 and −18 to −22% at h = 6, and the 2014–22 bias falls by a third.
+  It still loses to forwards.
+- **GBP:** small gains of 3–7%.
+- **USD:** none at 6–12 months.
+
 ## 3. Repository layout
 
 ```
@@ -215,11 +226,12 @@ src/yck/
   model/kalman.py           Kalman filter (missing rows), log-likelihood, RTS smoother, smoother sufficient statistics (compiled)
   model/statespace_dns.py   ML DNS (yields only or yields + macro): transforms, EM, exact score, multistart L-BFGS-B, 1 bp floor, shrinkage prior
   model/irf.py              impulse responses (Cholesky, generalised), variance decompositions, bands from the observed information
+  model/shadow.py           smooth shadow-rate DNS (Opschoor-van der Wel): EKF likelihood, Ansley-Kohn stationary map, forecasts
   model/adjust.py           forecast adjustments outside the likelihood: shifting endpoints (EWMA, surveys), AR(1) measurement errors, tilting to forwards
   eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, forwards, RMSE tables
   eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, model confidence set, ratio/significance tables
   eval/combine.py           forecast combination: equal and real-time inverse-MSE weights
-  eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy | --anchor`, notebooks' `ensure_results`), combinations
+  eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy | --anchor | --shadow`, notebooks' `ensure_results`), combinations
 notebooks/                  analysis notebooks, committed with outputs
 tests/                      offline tests: parsers (small samples in each source's real format), real-time panels, DNS, Kalman, backtest, stats, IRFs
 .github/workflows/
@@ -876,6 +888,52 @@ equal/inverse-MSE weights):
 - trade combination A with inverse-MSE weights;
 - keep yields + AR(1) as the pure-model signal.
 
+### 7.9 Results: smooth shadow-rate DNS (step 7b item 6)
+
+`notebooks/07_shadow_rate.ipynb`. The model is in §8 step 7b. The grid was
+committed before the run.
+
+**One estimator change after that commit, before any forecast was
+evaluated.**
+- The first run rejected explosive A with a penalty wall, as the linear code
+  does. The shadow model's level sits near a unit root, so L-BFGS-B's line
+  searches kept hitting the wall and stopped up to 60 log-likelihood points
+  short. Restarts found the better optima.
+- The estimator now uses the Ansley–Kohn (1986) stationary
+  reparameterisation, as the paper does. A single start then reaches the
+  restart optima to within about 1 point.
+- The old fits were discarded through `SHADOW_FIT_VERSION` in the cache key.
+
+**RMSE of the shadow model ÷ linear model, same error model** (DM; range
+over plug-in/mean, with and without AR(1)):
+
+| | h = 1 | h = 6 | h = 12 |
+|---|---|---|---|
+| USD 3m / 10y | 0.94–0.97 / 0.96–1.01 | 0.98 / 1.01–1.02 | 1.00 / 1.01–1.02 |
+| EUR 3m / 10y | 0.67–0.74 / 0.99–1.04 | 0.78–0.82 / 0.98–1.06 | 0.91–0.93 / 0.99–1.04 |
+| GBP 6m / 10y | 0.95–0.97 / 0.94–0.99 | 0.98–1.01 / 0.93–0.96 | 1.01–1.04 / 0.96–0.98 |
+
+- **Fit.** The log-likelihood gain over the linear model reaches +1,058
+  (USD), +535 (EUR) and +824 (GBP) by 2026, and is about zero before the
+  bound was reached.
+- **EUR bias in 2014–22** (12-month-ahead): 3m from +79 to +50 bp, 10y
+  from +54 to +38 bp. The random walk and forwards are within −7 to +27 bp,
+  and the EUR short end at h = 12 is still 1.31–1.33 × forwards: mean
+  reversion remains.
+- **GBP confidence set at h = 1:** the plain shadow model stays in the 90%
+  MCS (p ≈ 0.4) where the plain linear model is out. Shadow + AR(1) (mean)
+  is the best GBP model at one month (p = 1).
+- **USD:** the paper's US gains at 12 months (about −9% at 3m) are not
+  reproduced. Their setup differs: H.15 data from 1981, μ estimated, a 0%
+  bound and monthly re-estimation.
+- **Plug-in or mean.** The exact mean sits higher (convex measurement)
+  and is slightly more biased upward at the bound. RMSE differs by at most
+  0.02.
+- **Combination.** Putting the shadow model into combination A changes
+  nothing (±0.01).
+- **For step 8:** shadow + AR(1) (plug-in) is the pure-model signal for EUR
+  and GBP, the linear model for USD, and combination A is unchanged.
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -980,7 +1038,8 @@ equal/inverse-MSE weights):
    - items 3–4 (§7.8): combination A with inverse-MSE weights adopted for
      step 8, anchoring not adopted.
 
-   Items 5–8 are not started. Fix the full grid of
+   Item 6 ✅ (§7.9): the shadow-rate model is adopted for EUR and GBP. Items
+   5, 7 and 8 are not started. Fix the full grid of
    variants before running it, report every variant, and add a model
    confidence set across all models to the DM/CW tables, to avoid data
    snooping. Each step keeps real-time data and filtered states (§7.3).
