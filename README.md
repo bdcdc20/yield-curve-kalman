@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 159 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, panel parsers, EM-PCA and real-time factor rules, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
+| Offline tests | **Done.** 164 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, panel parsers, EM-PCA and real-time factor rules, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -1367,6 +1367,55 @@ month, at the short end, and in EUR's level bias. The trading evaluation
    curve and fly, then cross-currency relative value. Variance-based
    sizing, costs, Sharpe and certainty-equivalent return. The headline
    result is macro vs no macro in both RMSE and P&L.
+
+   **Grid, fixed on 12 Nov 2026 before any P&L was looked at**
+   (`eval/trading.py`: `run_trading`):
+
+   - **Instrument.** Receive the forward F_t(h, τ) on a τ-month zero
+     starting in h months. Realised P&L per unit of DV01 is
+     100 (F_t(h, τ) − y_{t+h}(τ)) bp. This is exact for zero-coupon bonds:
+     the h-month excess return of an (h + τ)-month zero is
+     τ/12 (F − y_{t+h}(τ)).
+   - **Signals,** s = 100 (F − ŷ), receive when positive:
+     - carry / roll-down (random walk, the benchmark);
+     - yields only;
+     - the best pure model (USD, GBP: short-hump Svensson + AR(1); EUR:
+       shadow-rate + AR(1));
+     - policy rate + AR(1);
+     - full macro (DRA);
+     - combination A (inverse MSE).
+
+     Outright strategies also get always-receive (buy-and-hold duration).
+   - **Strategies.**
+     - Outright: short end (3m; GBP 6m), 2y, 5y, 10y.
+     - DV01-neutral: 2s10s steepener (receive 2y, pay 10y) and 2s5s10s
+       butterfly (receive 2 × 5y, pay 2y and 10y).
+     - Cross-currency 10y spreads: USD–EUR, USD–GBP, EUR–GBP (receive the
+       first, pay the second).
+   - **Horizons.** h = 6 and 12 months for every currency; h = 1 for USD and
+     EUR only (GBP has no 1m yield). A new tranche opens every month and is
+     held h months, each with 1/h of the DV01 budget.
+   - **Sizing,** decided at the origin:
+     - `sign`: one unit of DV01;
+     - `scaled`: s / σ clipped to ±2, with σ the sd of the instrument's P&L
+       realised by the origin (at least 24 months; no position before).
+   - **Costs.** 0.5 bp per unit of DV01 per leg per round trip as the base
+     case; sensitivity at 0, 0.25, 1 and 2 bp.
+   - **Sample.** Origins from 2000 (USD) and 2010 (EUR, GBP). Each currency,
+     horizon and strategy is evaluated on the common months where every
+     signal has a position.
+   - **Reported.**
+     - Annualised mean P&L (bp per unit DV01), volatility, Sharpe ratio,
+       hit rate, maximum drawdown.
+     - t-statistics with autocovariances to lag h − 1.
+     - Each signal against carry (difference in mean net P&L, HAC t).
+     - Policy rate and full macro against yields only: the macro question.
+
+     The certainty-equivalent return is not reported separately: at a fixed
+     volatility target it ranks strategies exactly as the Sharpe ratio does.
+   - **Limitations to state.** These are curve-implied, not contract
+     returns: no futures basis, roll, margin or financing spread. GSW, ECB
+     and BoE curves are smoothed fits.
 9. Write-up in `README.md` (results section): RMSE ratios against RW and
    forwards, DM/CW statistics, strategy performance after costs, plus factor
    and impulse-response charts.
