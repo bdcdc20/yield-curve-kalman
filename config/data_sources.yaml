@@ -73,6 +73,47 @@ surveys:
     # ECB SPF longer-term (about five years ahead) HICP inflation, average of point forecasts, 1999Q1-.
     hicp_lt: {source: ecb, flow: SPF, key: Q.U2.HICP.POINT.LT.Q.AVG}
 
+# Large monthly macro panels for factor extraction (README section 8 step 7b item 7). All public;
+# downloaded by `yck fetch` into data/raw and never committed. EA-MD-QD is CC BY-NC 4.0 (non-commercial).
+# The UK-MD and EA-MD-QD URLs name a monthly release: update them here to refresh.
+# exclude: interest rates and spreads, so the factors carry macro information rather than the yield curve
+# itself (Moench 2008; Coroneo, Giannone & Modugno 2016). anchors: the series that fix each factor's sign
+# (factor 1 loads positively on industrial production, factor 2 on consumer prices).
+macro_panels:
+  USD:
+    source: fredmd   # McCracken & Ng (2016); real-time vintages from 1999-08
+    latest: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-10-md.csv"
+    archives:
+      - "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/historical_fred-md.zip"
+      - "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/historical-vintages-of-fred-md-2015-01-to-2025-12.zip"
+    monthly:
+      2026-01: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-01-md.csv"
+      2026-02: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-02-md.csv"
+      2026-03: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-03-md.csv"
+      2026-04: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-04-md.csv"
+      2026-05: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-05-md.csv"
+      2026-06: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-06-md.csv"
+      2026-07: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-07-md.csv"
+      2026-08: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-rev-08-md.csv"
+      2026-09: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-09-md.csv"
+      2026-10: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/2026-10-md.csv"
+    exclude: [FEDFUNDS, CP3Mx, TB3MS, TB6MS, GS1, GS5, GS10, AAA, BAA, COMPAPFFx, TB3SMFFM, TB6SMFFM,
+              T1YFFM, T5YFFM, T10YFFM, AAAFFM, BAAFFM]
+    anchors: [INDPRO, CPIAUCSL]
+  EUR:
+    source: eamdqd   # Barigozzi, Lissona & Delfino, Zenodo; monthly series only, the authors' default ("light", TR1) codes
+    url: "https://zenodo.org/records/23734030/files/EA-MD-QD-2026-10.zip?download=1"
+    file: EAdata.xlsx
+    code_column: TR1
+    exclude: [IRT3M_EACC, IRT6M_EACC, LTIRT_EACC]
+    anchors: [IPMN_EA, HICPOV_EA]
+  GBP:
+    source: ukmd     # Coulombe, Marcellino & Stevanovic; UK-MD
+    url: "https://www.stevanovic.uqam.ca/UKMD_October_2026.zip"
+    file: raw_uk_md.csv
+    exclude: [BANK_RATE, MORT_FIXED_RATE_5YRS, MORT_FIXED_RATE_2YRS, LIBOR_3mth, SONIA]
+    anchors: [IOP_PROD, CPI_ALL]
+
 # Publication lag (months) applied to macro series that have no vintage
 # history, so that a month-t forecast only uses data released by month t.
 release_lag_months:

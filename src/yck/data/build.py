@@ -6,6 +6,8 @@ Outputs (data/processed/):
     macro_{CCY}.parquet     monthly real_activity, inflation, policy_rate (latest vintage)
     vintages_USD.parquet    ALFRED real-time history for series with vintages: true
     surveys_{CCY}.parquet   quarterly survey expectations (SPF), indexed by survey quarter
+    panel_{CCY}.parquet     large monthly macro panel, latest vintage, raw values; codes in attrs["tcode"]
+    fredmd_vintages/YYYY-MM.parquet  every FRED-MD vintage (USD real-time factors)
     coverage.md             date ranges, gaps and cross-checks for every series
 """
 from __future__ import annotations
@@ -238,6 +240,28 @@ def run(config_path: Path, data_dir: Path, only: list[str] | None = None, refres
             df = pd.DataFrame(cols).sort_index()
             df.to_parquet(out / f"surveys_{ccy}.parquet")
             report += coverage(f"{ccy} surveys (quarterly, by survey quarter)", df)
+
+    for ccy, spec in cfg.get("macro_panels", {}).items():
+        if only and ccy not in only:
+            continue
+        try:
+            panel = src.fetch_panel(spec, raw, f"panel_{ccy}", refresh)
+            panel.attrs["vintage"] = f"{panel.index[-1] + pd.offsets.MonthEnd(1):%Y-%m}"
+            panel.to_parquet(out / f"panel_{ccy}.parquet")
+            report += [f"### {ccy} macro panel ({spec['source']})", "",
+                       f"- {panel.shape[1]} series, {panel.index[0]:%Y-%m} to {panel.index[-1]:%Y-%m}", ""]
+            if spec["source"] == "fredmd":
+                vdir = out / "fredmd_vintages"
+                vdir.mkdir(exist_ok=True)
+                vint = src.fetch_fredmd_vintages(spec, raw, refresh)
+                for label, df in vint.items():
+                    df.attrs["vintage"] = label
+                    df.to_parquet(vdir / f"{label}.parquet")
+                report += [f"- {len(vint)} FRED-MD vintages, {min(vint)} to {max(vint)}", ""]
+        except Exception as e:
+            ok = False
+            log.error("%s macro panel failed: %s", ccy, e)
+            report += [f"### {ccy} macro panel FAILED", "", "```", traceback.format_exc(limit=3), "```", ""]
 
     for ccy in cfg["macro"]:
         p = out / f"macro_{ccy}.parquet"

@@ -262,6 +262,99 @@ def fetch_spf(url: str, column: str, raw_dir: Path, refresh: bool = False) -> pd
     return parse_spf_xlsx(path.read_bytes(), column)
 
 
+# --------------------------------------------------------------------------- large macro panels
+# Output of every panel parser: a monthly frame indexed by month-end, one column per series, raw (seasonally
+# adjusted) values, with the transformation code of each series in df.attrs["tcode"] in the McCracken-Ng
+# convention: 1 x, 2 dx, 3 d2x, 4 log x, 5 dlog x, 6 d2log x, 7 d(x_t / x_{t-1} - 1).
+EA_TO_MN = {1: 4, 2: 5, 3: 6, 4: 1, 5: 2, 6: 3}  # EA-MD-QD codes -> McCracken-Ng codes
+
+
+def _month_end_index(dates) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(pd.to_datetime(dates)).to_period("M").to_timestamp("M").rename("date")
+
+
+def parse_fredmd_csv(text: str) -> pd.DataFrame:
+    """One FRED-MD vintage CSV: header, a 'Transform:' row of codes, then 'm/d/yyyy' rows."""
+    df = pd.read_csv(io.StringIO(text))
+    first = df.columns[0]
+    is_code = df[first].astype(str).str.strip().str.lower().str.startswith("transform")
+    codes = df[is_code].iloc[0, 1:]
+    data = df[~is_code & df[first].notna()]
+    out = data.iloc[:, 1:].apply(pd.to_numeric, errors="coerce")
+    out.index = _month_end_index(pd.to_datetime(data[first], format="%m/%d/%Y"))
+    out.attrs["tcode"] = {c: int(float(v)) for c, v in codes.items() if pd.notna(v)}
+    return out.dropna(how="all")
+
+
+def parse_ukmd_csv(text: str) -> pd.DataFrame:
+    """UK-MD raw_uk_md.csv: an index column, 'Date', a 'Transform' row of codes, then 'yyyy-mm-dd' rows."""
+    df = pd.read_csv(io.StringIO(text))
+    df = df.drop(columns=[c for c in df.columns if str(c).startswith("Unnamed")])
+    is_code = df["Date"].astype(str).str.strip().str.lower().str.startswith("transform")
+    codes = df[is_code].iloc[0].drop("Date")
+    data = df[~is_code]
+    out = data.drop(columns="Date").apply(pd.to_numeric, errors="coerce")
+    out.index = _month_end_index(data["Date"])
+    out.attrs["tcode"] = {c: int(float(v)) for c, v in codes.items() if pd.notna(v)}
+    return out.dropna(how="all")
+
+
+def parse_eamdqd_xlsx(blob: bytes, code_column: str = "TR1") -> pd.DataFrame:
+    """EA-MD-QD country workbook ('data' and 'info' sheets): the monthly series only, codes mapped to McCracken-Ng."""
+    book = pd.read_excel(io.BytesIO(blob), sheet_name=["data", "info"])
+    info = book["info"]
+    monthly = info[info["Frequency"].astype(str).str.upper() == "M"]
+    data = book["data"].set_index(book["data"].columns[0])
+    cols = [c for c in monthly["Name"] if c in data.columns]
+    out = data[cols].apply(pd.to_numeric, errors="coerce")
+    out.index = _month_end_index(out.index)
+    out.attrs["tcode"] = {n: EA_TO_MN[int(c)] for n, c in zip(monthly["Name"], monthly[code_column]) if n in cols}
+    return out.dropna(how="all")
+
+
+def fetch_panel(spec: dict, raw_dir: Path, name: str, refresh: bool = False) -> pd.DataFrame:
+    """Latest vintage of a large macro panel (`macro_panels` in the config)."""
+    src_ = spec["source"]
+    if src_ == "fredmd":
+        path = fetch_to_cache(spec["latest"], raw_dir, f"{name}.csv", refresh=refresh)
+        return parse_fredmd_csv(path.read_text())
+    path = fetch_to_cache(spec["url"], raw_dir, f"{name}.zip", refresh=refresh, timeout=300)
+    with zipfile.ZipFile(path) as z:
+        member = next(m for m in z.namelist() if m.endswith(spec["file"]) and "__MACOSX" not in m
+                      and "/raw/" not in m)
+        blob = z.read(member)
+    if src_ == "ukmd":
+        return parse_ukmd_csv(blob.decode("utf-8"))
+    if src_ == "eamdqd":
+        return parse_eamdqd_xlsx(blob, spec.get("code_column", "TR1"))
+    raise ValueError(f"unknown panel source {src_}")
+
+
+# Vintage file names in the archives: '2017-03.csv', '2026-10-md.csv', 'FRED-MD_2024m03.csv', 'FRED-MD-2025m05.csv'.
+_VINTAGE = re.compile(r"(\d{4})[-m](\d{2})(?:-md)?\.csv$")
+
+
+def fetch_fredmd_vintages(spec: dict, raw_dir: Path, refresh: bool = False) -> dict[str, pd.DataFrame]:
+    """Every FRED-MD vintage {'YYYY-MM': panel}: the historical zip archives plus the listed recent monthly CSVs."""
+    out = {}
+    for url in spec.get("archives", []):
+        path = fetch_to_cache(url, raw_dir, f"fredmd_{hashlib_name(url)}.zip", refresh=refresh, timeout=600)
+        with zipfile.ZipFile(path) as z:
+            for m in z.namelist():
+                hit = _VINTAGE.search(m.split("/")[-1])
+                if hit and "__MACOSX" not in m:
+                    out[f"{hit.group(1)}-{hit.group(2)}"] = parse_fredmd_csv(z.read(m).decode("utf-8", "replace"))
+    for label, url in spec.get("monthly", {}).items():
+        path = fetch_to_cache(url, raw_dir, f"fredmd_{label}.csv", refresh=refresh)
+        out[label] = parse_fredmd_csv(path.read_text())
+    return dict(sorted(out.items()))
+
+
+def hashlib_name(url: str) -> str:
+    import hashlib
+    return hashlib.sha1(url.encode()).hexdigest()[:10]
+
+
 # --------------------------------------------------------------------------- FRED / ALFRED
 FREDGRAPH = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 FRED_API = "https://api.stlouisfed.org/fred/series/observations"
