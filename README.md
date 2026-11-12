@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 159 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
+| Offline tests | **Done.** 159 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, panel parsers, EM-PCA and real-time factor rules, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -92,7 +92,7 @@ real-time sample mean (§6.3).
 | Forward-rate benchmark, Diebold–Mariano and Clark–West tests | **Done** (`eval/backtest.py`, `eval/stats.py`); USD results in §7.4. Optional SPF survey benchmark not done |
 | Yields + macro model (Diebold–Rudebusch–Aruoba 2006), USD | **Done** (`statespace_dns.py`, `data/realtime.py`, `model/irf.py`, `notebooks/03_macro_usd.ipynb`): real-time macro, full / policy-rate-only / shrunk models, impulse responses with bands, variance decompositions, out-of-sample tests. Results in §7.4 |
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
-| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–6 done: the shadow-rate DNS (`model/shadow.py`, notebook 07, §7.9) has large gains at the EUR short end, small in GBP, none in USD; the random-walk prior (notebook 08, §7.10) helps the EUR curve and GBP long end at τ = 0.03. Item 8 (dynamic Svensson, notebook 09, §7.11) done: a second, short-end curvature factor fixes the short-end fit and the one-month forecasts. Item 7 not started |
+| Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–6 done: the shadow-rate DNS (`model/shadow.py`, notebook 07, §7.9) has large gains at the EUR short end, small in GBP, none in USD; the random-walk prior (notebook 08, §7.10) helps the EUR curve and GBP long end at τ = 0.03. Item 8 (dynamic Svensson, notebook 09, §7.11) done: a second, short-end curvature factor fixes the short-end fit and the one-month forecasts. Item 7 (macro factors from FRED-MD / EA-MD-QD / UK-MD, notebook 10, §7.12) done: no information beyond the policy rate. **Step 7b complete**; what was adopted is summarised at the end of §7.12 |
 | Trading evaluation | Not started (§7.5; after §8 step 7b) |
 | Final write-up | Not started (§8, step 9) |
 
@@ -228,6 +228,11 @@ a model confidence set covers every model in the project.
   and the best GBP model at 6 months in the confidence set.
 - **A long-end hump** only repeats what the AR(1) errors do.
 
+**Step 7b item 7, macro factors from large panels
+(`notebooks/10_macro_factors.ipynb`, §7.12).** One or two real-time factors
+from FRED-MD (all vintages), EA-MD-QD and UK-MD add nothing beyond the
+policy rate in USD. Two factors make EUR and GBP forecasts 5–17% worse.
+
 ## 3. Repository layout
 
 ```
@@ -244,11 +249,12 @@ src/yck/
   model/statespace_dns.py   ML DNS (yields only or yields + macro): transforms, EM, exact score, multistart L-BFGS-B, 1 bp floor, shrinkage prior
   model/irf.py              impulse responses (Cholesky, generalised), variance decompositions, bands from the observed information
   model/shadow.py           smooth shadow-rate DNS (Opschoor-van der Wel): EKF likelihood, Ansley-Kohn stationary map, forecasts
+  model/macro_factors.py    real-time factors from large macro panels: transforms, EM principal components, vintages / ragged edge
   model/adjust.py           forecast adjustments outside the likelihood: shifting endpoints (EWMA, surveys), AR(1) measurement errors, tilting to forwards
   eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, forwards, RMSE tables
   eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, model confidence set, ratio/significance tables
   eval/combine.py           forecast combination: equal and real-time inverse-MSE weights
-  eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy | --anchor | --shadow`, notebooks' `ensure_results`), combinations
+  eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy | --anchor | --shadow | --rwprior | --svensson | --factors`, notebooks' `ensure_results`), combinations
 notebooks/                  analysis notebooks, committed with outputs
 tests/                      offline tests: parsers (small samples in each source's real format), real-time panels, DNS, Kalman, backtest, stats, IRFs
 .github/workflows/
@@ -270,6 +276,8 @@ Further model and evaluation modules are planned in §8.
 | `curves_ext_{USD,EUR,GBP}.parquet` | The same month-end curves at every maturity the forward-rate benchmark needs (§7.4): the grid, each horizon h in `forecast_horizons_months`, and each grid τ + h (1m–132m). GBP: only maturities the BoE publishes (61/73/85/97/109/121m are not, so 1-month forwards for τ ≥ 60m are missing) |
 | `macro_{USD,EUR,GBP}.parquet` | Monthly `real_activity`, `inflation`, `policy_rate`, **latest vintage**, index = month-end. Transforms already applied (see table below) |
 | `surveys_{USD,EUR}.parquet` | Quarterly survey expectations indexed by the first day of the survey quarter: USD `bond10`, `cpi10`; EUR `hicp_lt`. **Not yet aligned to publication dates**: use `yck.model.adjust.survey_endpoint`, which applies `survey_known_month` |
+| `panel_{USD,EUR,GBP}.parquet` | Large monthly macro panels, latest vintage, raw values: FRED-MD (126 series), EA-MD-QD monthly (47), UK-MD (111). Transformation codes (McCracken–Ng convention) in `attrs["tcode"]`. EA-MD-QD is CC BY-NC (non-commercial) |
+| `fredmd_vintages/YYYY-MM.parquet` | Every FRED-MD vintage, 1999-08 onwards (327 files), for real-time USD factors |
 | `vintages_USD.parquet` | ALFRED real-time history, long format: `series_id, date, realtime_start, realtime_end, value` (`realtime_end` of a still-current vintage is set to 2262-04-11) |
 | `coverage.md` | First/last date and in-range gaps for every series, plus cross-checks |
 
@@ -1013,6 +1021,52 @@ plain / with AR(1); DM):
   signal for USD and GBP. EUR keeps the shadow-rate model, and combination
   A is unchanged.
 
+### 7.12 Results: macro factors from large panels (step 7b item 7)
+
+`notebooks/10_macro_factors.ipynb`; the grid was committed before the run.
+
+**RMSE ratios** (h = 1 / 6 / 12, range over maturities):
+
+| | 1 factor ÷ yields (CW) | 2 factors ÷ yields (CW) | policy rate + 2 factors ÷ policy rate (DM) |
+|---|---|---|---|
+| USD | 0.99–1.01 / 0.99–1.01 / 0.99–1.00 | 1.00–1.02 / 1.00–1.01 / 1.00–1.01 | 0.99–1.01 / 1.00–1.01 / 0.99–1.01 |
+| EUR | 0.96–1.00 / 0.99–1.02 / 1.00–1.04 | 0.99–1.05 / 0.99–1.15 / 1.00–1.17 | 0.99–1.09 / 1.00–1.07 / 1.01–1.08 |
+| GBP | 1.00–1.02 / 0.98–1.03 / 0.99–1.04 | 0.99–1.14 / 1.05–1.12 / 1.07–1.16 | 0.99–1.05 / 1.02–1.16 / 1.02–1.15 |
+
+- **The factors are meaningful.** Factor 1 correlates 0.80–0.86 with
+  industrial production. Factor 2 correlates 0.88–0.94 with consumer prices
+  in USD and GBP, but only 0.32 in EUR.
+- **They do not help forecast yields.** The USD factors are fully
+  real-time (FRED-MD vintages) and still add nothing beyond the policy
+  rate. In EUR and GBP a second factor hurts, significantly when added to
+  the policy-rate model.
+- **Confidence set.** No separation at h = 6–12.
+- **Reading.** The large gains in the literature are on pre-2008 US
+  samples. Since then the policy path dominates, and the forward curve
+  already prices it.
+- **Not adopted.** The panel pipeline stays for extensions.
+
+**Step 7b in one table: what each item did, and what carries into step 8.**
+
+| Item | Result | Adopted |
+|---|---|---|
+| 1. AR(1) measurement errors (§7.7) | Fixes one-month forecasts everywhere; nothing at 6–12 months | Yes, in every pure-model signal |
+| 2. Shifting endpoints (§7.7) | Removes bias in trends, overshoots at turns; no net gain | No |
+| 3. Forecast combination (§7.8) | At or below forwards at the long end in all currencies; best USD model | Yes: combination A, inverse MSE |
+| 4. Anchoring to forwards (§7.8) | Fixes the EUR short end only; removes the short-end signal | No |
+| 5. Random-walk prior (§7.10) | τ = 0.03 helps EUR (7–16%) and the GBP long end | For the EUR/GBP long end |
+| 6. Shadow-rate DNS (§7.9) | Large gains at the EUR short end, small in GBP, none in USD | EUR (and GBP) pure-model signal |
+| 7. Panel macro factors (§7.12) | Nothing beyond the policy rate | No |
+| 8. Dynamic Svensson (§7.11) | Short-end hump fixes the short-end fit; GBP level with forwards | USD and GBP pure-model signal |
+
+Across all of it, **no model beats the forward curve or the random walk
+significantly at 6–12 months in any currency.** The gains are at one
+month, at the short end, and in EUR's level bias. The trading evaluation
+(step 8) uses combination A and, per currency, the best pure model:
+- USD and GBP: short-hump Svensson + AR(1);
+- EUR: shadow-rate DNS + AR(1), with the random-walk prior for the long
+  end.
+
 ## 8. Roadmap (next steps, in order)
 
 1. ✅ **`src/yck/model/dns.py`:** Nelson–Siegel loadings, two-step DL
@@ -1120,7 +1174,8 @@ plain / with AR(1); DM):
    Item 6 ✅ (§7.9): the shadow-rate model is adopted for EUR and GBP. Item 5
    ✅ (§7.10): the τ = 0.03 random-walk prior is adopted for the EUR/GBP long
    end. Item 8 ✅ (§7.11): the short-hump dynamic Svensson model is adopted for
-   USD and GBP. Item 7 is not started. Fix the full grid of
+   USD and GBP. Item 7 ✅ (§7.12): panel macro factors are not adopted. Step 7b
+   is complete; the adopted models are summarised at the end of §7.12. Fix the full grid of
    variants before running it, report every variant, and add a model
    confidence set across all models to the DM/CW tables, to avoid data
    snooping. Each step keeps real-time data and filtered states (§7.3).
