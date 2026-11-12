@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 141 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights), all passing (`pytest -q`) |
+| Offline tests | **Done.** 146 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -1054,6 +1054,38 @@ equal/inverse-MSE weights):
      random walk (DM). Each anchored model is tested against the same model
      unanchored (DM). The 90% model confidence set is extended to every
      model from steps 7 and 7b.
+
+   **Grid for item 6, fixed on 12 Nov 2026 before any of it was run**
+   (`model/shadow.py`, `eval/grid.py: shadow_grid`;
+   `python -m yck backtest --ccy USD EUR GBP --shadow`):
+
+   - **Model.** The smooth shadow-rate DNS of Opschoor & van der Wel
+     (2025), yields only: y(τ) = r_LB + κ f((s(τ) − r_LB)/κ), with
+     f(x) = xΦ(x) + φ(x) and s(τ) the Nelson–Siegel shadow curve.
+     - Estimated by extended-Kalman-filter maximum likelihood from the
+       linear DNS fit of the same sample, with μ at the real-time sample
+       mean and λ = 0.0609.
+     - κ = 1, the paper's forecasting choice.
+     - r_LB = min(0, lowest yield in the estimation sample). That is the
+       paper's 0% unless yields have already been negative (EUR, and GBP in
+       2020), and it is learnt in real time at each refit.
+   - **Forecasts.**
+     - `plugin`: the forecast shadow curve put through the measurement
+       function.
+     - `mean`: the expectation over the shadow curve's forecast variance v,
+       i.e. the same formula with κ' = √(κ² + v).
+
+     Each is run plain and with `ar1` errors: 4 backtests per currency from
+     one set of refits.
+   - **Combination.** Set "A-shadow" is set A with the shadow model +
+     `ar1` (plug-in) in place of yields + `ar1`, with equal and inverse-MSE
+     weights.
+   - **Reporting.**
+     - Against forwards and the random walk (DM).
+     - Against the linear model with the same error model (DM).
+     - Mean errors in the zero/low-rate years (USD 2009–15, EUR 2014–22,
+       GBP 2009–21).
+     - The 90% model confidence set over all models.
 
    Fixing failures 1 and 2 also matters for step 8: the trading signal is
    F − ŷ, and the level bias would keep the strategy short duration through
