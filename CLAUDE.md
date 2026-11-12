@@ -59,8 +59,11 @@ evaluation protocol, the roadmap and the decisions already made.
 - Step 8 is done (`eval/trading.py`, notebook 11, README §7.13): carry /
   roll-down is the strategy to beat, and no model beats it more often than
   chance. The policy rate adds P&L to USD curve trades. Sharpe ratios of
-  overlapping h-month tranches are annualised by √(12/h). Next: the
-  write-up (step 9). The UK-MD and EA-MD-QD URLs in the config name a monthly
+  overlapping h-month tranches are annualised by √(12/h).
+- Step 9 is done: the write-up is the "Results at a glance" section at the top
+  of README.md, with figures from `python -m yck figures` (`src/yck/report.py`,
+  committed in `docs/figures/`). Regenerate the figures after re-running backtests.
+  All roadmap steps are complete. The UK-MD and EA-MD-QD URLs in the config name a monthly
   release; update them to refresh. Fix each new grid in README §8 and commit it
   before running it.
 - Backtest outputs go in `data/results/` (git-ignored), fits are cached in

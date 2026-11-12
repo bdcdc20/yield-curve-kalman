@@ -11,6 +11,169 @@ and updates it as each new observation arrives.
 policy rate) improve out-of-sample yield forecasts beyond what the curve
 already contains, in USD, EUR and GBP?
 
+## Results at a glance
+
+**Short answer.** Across USD, EUR and GBP, 2000–2026, no model in this
+project forecasts the yield curve significantly better than the forward
+curve at 6 and 12 months. None of them makes more money than the trade
+that needs no model at all: receiving the forward where the curve is steep
+(carry and roll-down). Macro information helps in one place only: the
+policy rate, in USD. The models do improve where the literature says they
+should: at one month, at the short end, and at the zero lower bound. The
+write-up below is the summary; every number links to a notebook and to the
+detailed sections (§7.4–7.13).
+
+![Yields and policy rates](docs/figures/curves.png)
+
+### What was done
+
+- **Data, public only:**
+  - Fed (Gürkaynak–Sack–Wright), ECB and Bank of England zero-coupon
+    curves.
+  - Real-time macro data: ALFRED vintages for US activity and inflation,
+    publication lags elsewhere, and FRED-MD with all 327 vintages for the
+    panel factors.
+  - Philadelphia Fed and ECB survey expectations.
+  - The FRED-MD, EA-MD-QD and UK-MD macro panels.
+- **Models:** the dynamic Nelson–Siegel state-space model estimated by
+  Kalman-filter maximum likelihood (EM + exact score), with these
+  extensions:
+  - macro variables (Diebold–Rudebusch–Aruoba) and shrinkage;
+  - AR(1) measurement errors;
+  - shifting endpoints;
+  - a random-walk prior;
+  - a smooth shadow-rate model for the lower bound (extended Kalman
+    filter);
+  - a 4-factor dynamic Svensson model;
+  - large-panel macro factors;
+  - forecast combination and anchoring to forwards.
+- **Out-of-sample protocol:**
+  - re-estimated every year;
+  - forecasts from filtered states only;
+  - no data dated after the forecast origin;
+  - origins from 2000 (USD) and 2010 (EUR, GBP);
+  - horizons of 1, 6 and 12 months.
+- **Benchmarks and tests:**
+  - benchmarks: random walk and forward rates;
+  - pairwise tests: Diebold–Mariano and Clark–West with HAC variances;
+  - joint test: a model confidence set over every model, 58–70 per
+    currency.
+- **Guarding against data snooping.** Every grid of variants was written
+  into this README and committed *before* it was run, and every variant is
+  reported.
+- **Trading:** carry, outright, curve, butterfly and cross-currency trades
+  on the forward curve, with real-time sizing and costs (§7.13).
+- **Engineering:**
+  - 165 offline tests, including the filter against `statsmodels` to ~1e-9;
+  - a compiled Kalman filter with steady-state shortcuts;
+  - the full backtest grid in under 2 minutes on 8 cores, cached.
+
+### Findings
+
+**1. Nothing beats the forward curve at 6–12 months, and at the long end
+the random walk does.** RMSE relative to the forward rate (below 1 = more
+accurate; Diebold–Mariano: \* 10%, \*\* 5%, \*\*\* 1%):
+
+| | Horizon | Random walk | Yields only | Best model | Policy rate | Combination |
+|---|---|---|---|---|---|---|
+| USD 3m | 1 month | 1.26\*\*\* | 1.22\*\*\* | 1.06\*\* | 1.07\*\* | 1.05\*\* |
+| USD 3m | 12 months | 1.13 | 1.00 | 0.98 | 0.98 | 1.00 |
+| USD 10y | 12 months | **0.89\*** | 0.98 | 0.95 | 0.96 | 0.93 |
+| EUR 3m | 1 month | 1.31\*\*\* | 2.40\*\*\* | 1.26\*\*\* | 1.74\*\*\* | 1.12\*\*\* |
+| EUR 10y | 12 months | 0.90 | 1.13 | 1.20 | 1.18 | 0.97 |
+| GBP 6m | 12 months | 1.12 | 0.97 | 0.94 | 1.08 | 1.01 |
+| GBP 10y | 12 months | 0.92 | 1.09\*\* | 1.05 | 1.07\* | 0.98 |
+
+"Best model" is the step 7b choice per currency: the 4-factor Svensson
+model with AR(1) errors (USD, GBP), and the shadow-rate model with AR(1)
+errors (EUR). "Combination" is the real-time inverse-MSE average of model,
+two-step VAR, forwards and random walk.
+
+- **Short end.** Forward rates are the market's expected policy path, and
+  no curve model beats them there.
+- **Long end.** The forward rate overpredicts future long yields because
+  it contains a term premium, so even a no-change forecast beats it at 10
+  years. The models sit between the two.
+
+![RMSE relative to forwards](docs/figures/rmse_vs_forwards.png)
+
+**2. The fixes work where the literature says they should, and not
+beyond.**
+
+| Fix (section) | Where it helps |
+|---|---|
+| AR(1) measurement errors (§7.7) | One-month errors fall 10–33% at the ends of the curve in every currency. The plain fixed-λ models drop out of the one-month confidence set. |
+| Shadow-rate model (§7.9) | EUR short end 26–33% better at one month and 18–22% at six; the zero-years bias falls by a third. |
+| Second, short-end curvature factor (§7.11) | One-month errors −13% (USD), −48% (EUR), −14% (GBP); GBP short end level with forwards for the first time. |
+| Tight random-walk prior (§7.10) | EUR 7–16% better at 6–12 months. |
+
+None of these changes the 6–12-month verdict, and the confidence set
+cannot separate the 22–70 models at those horizons.
+
+**3. Mean reversion to a historical average was the main source of loss.**
+The level reverted to the 1985 (USD), 2004 (EUR) or 1993 (GBP) average
+while rates trended down for two decades. EUR 10y forecasts ran 78–92 bp
+too high in 2010–2021, more than the random walk or the forwards.
+
+- **Shifting endpoints** remove the trend bias but overshoot when rates
+  turn, as in 2022.
+- **Survey endpoints** stay too high: forecasters expected normalisation
+  too.
+- **The random-walk prior** helps most, a lesson that also explains why
+  carry wins.
+
+![EUR bias by period](docs/figures/eur_bias.png)
+
+**4. Macro information: only the policy rate, only in USD, and the curve
+leads policy.**
+
+- **In USD, the policy rate improves forecasts at every maturity** at 12
+  months (Clark–West), and adds P&L to curve trades:
+  - the 2s10s steepener, t = 2.2;
+  - the butterfly, t = 4.0 at 1 month and 2.0 at 6 months.
+- **The full macro model overfits** (activity, inflation, policy rate:
+  6–23% worse).
+- **Large-panel factors add nothing,** even with real-time FRED-MD vintages.
+- **In sample, the curve leads policy.** A curvature shock raises the
+  policy rate by 20–30 bp, peaking after about 18–22 months, in all
+  three currencies. Macro shocks explain only 4–10% of the factors' 12-month
+  forecast variance.
+
+![Impulse responses](docs/figures/impulse_responses.png)
+
+**5. In P&L, carry wins.**
+- **Receiving the 10-year forward on carry** earns a Sharpe ratio of 0.40
+  in USD and 0.33 in EUR (12-month tranches, after costs), against 0.26 and
+  0.07 for simply holding duration.
+- **No model beats carry more often than chance:** t > 2 in 10 of 275
+  comparisons, where about 7 are expected.
+- **Butterflies and cross-currency spreads lose** for nearly every signal.
+- **This agrees with Thornton & Valente (2012):** statistical
+  predictability does not turn into economic value against forwards.
+
+![Cumulative P&L, 10-year](docs/figures/pnl_10y.png)
+
+### Limitations and what would come next
+
+- **Curve-implied returns, not contract returns:** no futures basis, roll,
+  margin or financing spread. The source curves are smoothed fits.
+- **Real-time data only partly.** EUR and GBP have no real-time vintages,
+  so revisions are ignored there; USD is fully real-time.
+- **Short samples outside the US.** Fifteen years of out-of-sample data for
+  EUR and GBP, with one rate cycle at the lower bound and one sharp
+  tightening.
+- **Next steps:**
+  - test the two candidate signals (the USD policy-rate curve trades and
+    GBP 2y) on futures data;
+  - add a time-varying term premium (an arbitrage-free model) to separate
+    expectations from risk premia, which is what carry harvests;
+  - evaluate density forecasts, not only point forecasts.
+
+**Reproduce:** `python -m yck fetch`, then
+`python -m yck backtest --ccy USD EUR GBP --all` (and `--accuracy`,
+`--anchor`, `--shadow`, `--rwprior`, `--svensson`, `--factors`), then
+`python -m yck figures`. Notebooks 01–11 hold every table.
+
 Contents:
 
 1. [Quick start](#1-quick-start)
@@ -94,7 +257,7 @@ real-time sample mean (§6.3).
 | EUR and GBP, cross-currency comparison | **Done** (`notebooks/04_eur_gbp.ipynb`); results in §7.4 and below |
 | Accuracy improvements from the literature | **Items 1–4 done** (`model/adjust.py`, `eval/combine.py`, notebooks 05–06, results in §7.7–7.8): AR(1) measurement errors fix the 1-month forecasts; shifting endpoints do not help on balance; anchoring to forwards fixes the EUR short end only; combinations are at or below forwards at the long end everywhere. Items 5–6 done: the shadow-rate DNS (`model/shadow.py`, notebook 07, §7.9) has large gains at the EUR short end, small in GBP, none in USD; the random-walk prior (notebook 08, §7.10) helps the EUR curve and GBP long end at τ = 0.03. Item 8 (dynamic Svensson, notebook 09, §7.11) done: a second, short-end curvature factor fixes the short-end fit and the one-month forecasts. Item 7 (macro factors from FRED-MD / EA-MD-QD / UK-MD, notebook 10, §7.12) done: no information beyond the policy rate. **Step 7b complete**; what was adopted is summarised at the end of §7.12 |
 | Trading evaluation | **Done** (`eval/trading.py`, `notebooks/11_trading.ipynb`, results in §7.13): carry / roll-down is the strategy to beat (USD 10y Sharpe 0.40), and no model beats it more often than chance; the policy rate adds P&L to USD curve trades |
-| Final write-up | Not started (§8, step 9) |
+| Final write-up | **Done**: [Results at a glance](#results-at-a-glance) at the top of this README; figures from `python -m yck figures` (`src/yck/report.py`, `docs/figures/`) |
 
 Latest verified coverage (month-end, output of `python -m yck fetch`):
 
@@ -266,9 +429,11 @@ src/yck/
   model/adjust.py           forecast adjustments outside the likelihood: shifting endpoints (EWMA, surveys), AR(1) measurement errors, tilting to forwards
   eval/backtest.py          recursive out-of-sample forecasts (no look-ahead), parallel cached refits, random walk, forwards, RMSE tables
   eval/stats.py             Diebold-Mariano (HLN) and Clark-West tests, model confidence set, ratio/significance tables
+  report.py                 the README figures (`python -m yck figures` -> docs/figures/)
   eval/combine.py           forecast combination: equal and real-time inverse-MSE weights
   eval/grid.py              the standard and step 7b grids of backtests as one job (CLI `backtest --all | --accuracy | --anchor | --shadow | --rwprior | --svensson | --factors`, notebooks' `ensure_results`), combinations
-notebooks/                  analysis notebooks, committed with outputs
+notebooks/                  analysis notebooks 01-11, committed with outputs
+docs/figures/               README figures, generated by `python -m yck figures`
 tests/                      offline tests: parsers (small samples in each source's real format), real-time panels, DNS, Kalman, backtest, stats, IRFs
 .github/workflows/
   ci.yml                    pytest on every push / PR
@@ -1480,9 +1645,10 @@ with scaled sizing, unless stated.
    - **Limitations to state.** These are curve-implied, not contract
      returns: no futures basis, roll, margin or financing spread. GSW, ECB
      and BoE curves are smoothed fits.
-9. Write-up in `README.md` (results section): RMSE ratios against RW and
-   forwards, DM/CW statistics, strategy performance after costs, plus factor
-   and impulse-response charts.
+9. ✅ Write-up in `README.md` ([Results at a glance](#results-at-a-glance)):
+   RMSE ratios against RW and forwards, DM/CW statistics, strategy
+   performance after costs, plus factor and impulse-response charts
+   (`python -m yck figures`).
 
 Dependencies: `scipy` is core; `statsmodels` is in `dev` (test reference
 only); `matplotlib` and `jupyter` are in the `notebook` extra.
