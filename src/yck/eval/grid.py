@@ -78,12 +78,24 @@ def rwprior_grid(ccy: str) -> list[tuple]:
             for err in (None, "ar1")]
 
 
+# Step 7b item 8, fixed before it was run (README section 8): a second curvature factor (dynamic Svensson)
+# whose loading peaks at 9 months (short end) or 90 months (long end); lambda * tau = 1.7933 at the peak.
+SVENSSON_LAM2 = {"short": 1.7933 / 9, "long": 1.7933 / 90}
+
+
+def svensson_grid(ccy: str) -> list[tuple]:
+    """4-factor dynamic Svensson, yields only, for each second-curvature decay, plain and with AR(1) errors."""
+    return [(None, "fixed", None, None, err, None, None, None, l2) for l2 in SVENSSON_LAM2.values()
+            for err in (None, "ar1")]
+
+
 def run_tag(mvars, lam_mode: str, tau, floor=1.0, endpoint=None, error_ar=None, anchor=None, shadow=None,
-            rw_tau=None) -> str:
+            rw_tau=None, lam2=None) -> str:
     """File tag of one backtest, e.g. 'macro-policy_rate_ep-ewma_lamfixed_err-ar1c'
     (fc_{CCY}_kalman_{tag}_h{h}.parquet). Without an endpoint, error model or anchor the tags are those of step 7."""
     mtag = "" if mvars is None else ("macro_" if len(mvars) == 3 else "macro-" + "+".join(mvars) + "_")
     return (mtag + (f"shrink{tau:g}_" if tau is not None else "") + (f"rw{rw_tau:g}_" if rw_tau is not None else "")
+            + (f"sv{lam2:.4f}_" if lam2 is not None else "")
             + (f"ep-{endpoint}_" if endpoint else "")
             + f"lam{'est' if lam_mode == 'est' else 'fixed'}" + ("" if floor else "_nofloor")
             + (f"_err-{error_ar}" if error_ar else "") + (f"_anc-{anchor}" if anchor else "")
@@ -100,10 +112,10 @@ def load_endpoint(name: str, ccy: str, yields: pd.DataFrame, data_dir: Path, con
 
 
 def _grid_for(grid, ccy: str) -> list[tuple]:
-    """Grid entries as 8-tuples (macro vars, lambda mode, tau, endpoint, error model, anchor, shadow, rw_tau);
-    `grid` is a list of 3- to 8-tuples, or a function of the currency."""
+    """Grid entries as 9-tuples (macro vars, lambda mode, tau, endpoint, error model, anchor, shadow, rw_tau,
+    lam2); `grid` is a list of 3- to 9-tuples, or a function of the currency."""
     rows = grid(ccy) if callable(grid) else grid
-    return [tuple(r) + (None,) * (8 - len(r)) for r in rows]
+    return [tuple(r) + (None,) * (9 - len(r)) for r in rows]
 
 
 def plan_runs(ccys, data_dir: Path, config: Path, grid=STANDARD_GRID, est_start=None, first_origin=None,
@@ -116,18 +128,18 @@ def plan_runs(ccys, data_dir: Path, config: Path, grid=STANDARD_GRID, est_start=
         y = pd.read_parquet(Path(data_dir) / "processed" / f"curves_{ccy}.parquet")
         macros, endpoints = {}, {}  # built once per currency, shared by the variants (macro panels memoised)
         ext = None
-        for mvars, lam_mode, tau, ep, err, anc, sr, rw in _grid_for(grid, ccy):
+        for mvars, lam_mode, tau, ep, err, anc, sr, rw, l2 in _grid_for(grid, ccy):
             if mvars is not None and mvars not in macros:
                 macros[mvars] = RealTimeMacro.load(ccy, data_dir, config, mvars)
             if ep is not None and ep not in endpoints:
                 endpoints[ep] = load_endpoint(ep, ccy, y, data_dir, config)
             if anc is not None and ext is None:
                 ext = pd.read_parquet(Path(data_dir) / "processed" / f"curves_ext_{ccy}.parquet")
-            runs.append((ccy, run_tag(mvars, lam_mode, tau, floor, ep, err, anc, sr, rw),
+            runs.append((ccy, run_tag(mvars, lam_mode, tau, floor, ep, err, anc, sr, rw, l2),
                          dict(yields=y, est_start=es, first_origin=fo, reestimate_every=every,
                               estimate_lambda=lam_mode == "est", h_floor_bp=floor, n_starts=starts,
                               macro=macros.get(mvars), shrink_tau=tau, endpoint=endpoints.get(ep), error_ar=err,
-                              anchor=ext if anc == "fwd" else None, shadow=sr, rw_tau=rw)))
+                              anchor=ext if anc == "fwd" else None, shadow=sr, rw_tau=rw, lam2=l2)))
     return runs
 
 
@@ -173,7 +185,7 @@ def ensure_results(ccys, data_dir: Path, config: Path, jobs: int | None = None, 
 
 def tag_of(row) -> str:
     """run_tag of one grid entry (3- to 6-tuple) with the default noise floor."""
-    r = tuple(row) + (None,) * (8 - len(row))
+    r = tuple(row) + (None,) * (9 - len(row))
     return run_tag(*r[:3], 1.0, *r[3:])
 
 

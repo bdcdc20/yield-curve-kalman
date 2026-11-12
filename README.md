@@ -83,7 +83,7 @@ real-time sample mean (§6.3).
 | Stage | Status |
 |---|---|
 | Data pipeline (curves + macro, USD/EUR/GBP) | **Done.** Verified end-to-end on GitHub Actions; every source fetches and is current |
-| Offline tests | **Done.** 148 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
+| Offline tests | **Done.** 151 tests (parsers, real-time panels, DNS, backtest, Kalman filter vs statsmodels and brute force, steady-state shortcuts vs the full recursion, EM, exact score, stationarity repair, shrinkage, DM/CW, model confidence set, impulse responses vs statsmodels, shifting endpoints, AR(1) errors and forward anchoring without look-ahead, real-time combination weights, shadow-rate EKF vs Kalman, Ansley–Kohn map), all passing (`pytest -q`) |
 | CI (tests on every push) and monthly data-fetch workflow | **Done** |
 | Two-step Diebold–Li baseline (yields only) | **Done** (`src/yck/model/dns.py`). USD 1985–2000: factor/proxy correlations 0.97–0.999, fit RMSE 2–8 bp (3m: 8 bp) |
 | USD two-step notebook (factor plots, first RW comparison) | **Done** (`notebooks/01_two_step_usd.ipynb`); first results below |
@@ -1203,6 +1203,26 @@ over plug-in/mean, with and without AR(1)):
      - Against forwards and the random walk (DM).
      - Against the same model without the prior (DM).
      - The largest eigenvalue of A across refits.
+     - The 90% model confidence set over all models.
+
+   **Grid for item 8, fixed on 12 Nov 2026 before any of it was run**
+   (`ns_loadings(..., lam2)`, `DNSParams.lam2`, `eval/grid.py:
+   svensson_grid`; `python -m yck backtest --ccy USD EUR GBP --svensson`):
+
+   - **Model.** A 4-factor dynamic Svensson model: level, slope and
+     curvature with λ = 0.0609, plus a second curvature with its own decay
+     λ₂. It is estimated exactly like the 3-factor model (EM + exact score,
+     1 bp floor, μ at the real-time sample mean, 6 starts).
+   - **Two values of λ₂, fixed by where the second hump peaks**
+     (λτ = 1.7933 at the peak):
+     - short: 9 months, λ₂ = 0.1993, aimed at the 3m/6m misfit;
+     - long: 90 months, λ₂ = 0.0199, aimed at the 10y misfit.
+   - **Grid.** Yields only, each value plain and with `ar1` errors: 4
+     backtests per currency, 2 sets of refits.
+   - **Reporting.**
+     - Against forwards and the random walk (DM).
+     - Against the 3-factor model with the same error model (DM).
+     - In-sample residual sd by maturity.
      - The 90% model confidence set over all models.
 
    Fixing failures 1 and 2 also matters for step 8: the trading signal is
